@@ -15,8 +15,9 @@ class Game:
         self.events = None
         self.fps: int = 60
         self.clock = p.time.Clock()
+        self.base_dir = workdir
         self.font_dir = None
-        self.assets_dir = None
+        self.assets_dir = ""
         self.font_medium = None  # This has to be set!
         self.title_screen = None
         p.init()
@@ -48,8 +49,7 @@ class Game:
         #  value: list of render functions to call
         self.render_stack = {"background": [], "foreground": [], "above_all": []}
 
-        self.mousepos = None
-        self.base_dir = workdir
+        self.mousepos = (0, 0)
         try:
             self.load_assets()
             self.load_map()

@@ -3,7 +3,7 @@ from numpy import linspace
 
 from Utils.Colors import RED, WHITE
 
-GIZMO_SIZE = 5
+GIZMO_SIZE = 15
 
 class QuadraticBezier:
     def __init__(self, p0: p.Vector2, p1: p.Vector2, p2: p.Vector2, resolution=100, show_handle_points=True):
@@ -46,7 +46,7 @@ class CubicBezier(QuadraticBezier):
         return  (1-t)**3 * self.p0 + \
                 3 * (1-t)**2 * t * self.p1 + \
                 3 * (1-t) * t**2 * self.p2 + \
-                t**3 * self.p3
+                t**3 * self.p3 # pyright: ignore[reportOperatorIssue]
     
     def render(self, surf):
         super().render(surf)

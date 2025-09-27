@@ -1,6 +1,7 @@
 import pygame
 from pygame import Rect
 
+from Game import Game
 from Generic.Stack import Stack
 from UI.Abstract import UICanvas
 from Utils.Text import draw_centered_text
@@ -8,8 +9,8 @@ from Utils.Colors import BLACK
 
 
 class State:
-    def __init__(self, game, msg=None, layer="foreground"):
-        self.game = game
+    def __init__(self, game: Game, msg=None, layer="foreground"):
+        self.game: Game = game
         self.canvas: UICanvas = UICanvas(game)
         self.bg_color = BLACK
         self.render_stack = Stack()
