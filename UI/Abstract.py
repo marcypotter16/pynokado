@@ -7,7 +7,7 @@ from Utils import Draw
 class UICanvas:
     def __init__(self, game: Game):
         self.game = game
-        self.font = game.font_medium
+        self.font: pygame.font.Font = game.fonts["comfortaa"]["medium"]
         self.y = None
         self.width = None
         self.x = None
@@ -44,8 +44,20 @@ class UICanvas:
 
 
 class UIContainer(UICanvas):
-    def __init__(self, parent: UICanvas, x=0, y=0, center: tuple[int, int] = None, width=None, height=None,
-                 bg_color: tuple | str = (40, 40, 40), fg_color=(0, 0, 0), font: pygame.font.Font | None = None, corner_radius=10, border_width=0):
+    def __init__(
+        self,
+        parent: UICanvas,
+        x=0,
+        y=0,
+        center: tuple[int, int] = None,
+        width=None,
+        height=None,
+        bg_color: tuple | str = (40, 40, 40),
+        fg_color=(0, 0, 0),
+        font: pygame.font.Font | None = None,
+        corner_radius=10,
+        border_width=0,
+    ):
         """
         Container for GUI
         :param parent: the parent, usually a UICanvas
@@ -59,7 +71,7 @@ class UIContainer(UICanvas):
         :param corner_radius: corner radius for smoothed rectangles
         """
         super().__init__(parent.game)
-        self.font = font if font is not None else self.game.font_medium
+        self.font = font if font is not None else self.game.fonts["comfortaa"]["medium"]
         self.children: list[UIContainer] = []
 
         self.parent = parent
@@ -70,7 +82,9 @@ class UIContainer(UICanvas):
         self.y = y
         if center is not None:
             self.x, self.y = center[0] - width / 2, center[1] - height / 2
-        self.width, self.height = width if width is not None else 1, height if height is not None else 1
+        self.width, self.height = width if width is not None else 1, (
+            height if height is not None else 1
+        )
         self.rect = pygame.rect.Rect(self.x, self.y, self.width, self.height)
         if bg_color == "transparent":
             self.original_bg_color = self.bg_color = (0, 0, 0, 0)
@@ -85,10 +99,14 @@ class UIContainer(UICanvas):
         self.rect = rect
         horizontal_scaling_factor = float(rect.width) / self.width
         vertical_scaling_factor = float(rect.height) / self.height
-        self.x, self.y, self.width, self.height = rect.x, rect.y, rect.width, rect.height
+        self.x, self.y, self.width, self.height = (
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+        )
         for child in self.children:
-            child.x = self.x + \
-                round(horizontal_scaling_factor * (child.x - px))
+            child.x = self.x + round(horizontal_scaling_factor * (child.x - px))
             child.y = self.y + round(vertical_scaling_factor * (child.y - py))
             child.height = round(child.height * vertical_scaling_factor)
             child.width = round(child.width * horizontal_scaling_factor)
@@ -99,12 +117,13 @@ class UIContainer(UICanvas):
         # surface.fill(self.original_bg_color, self.rect)
         if self.visible:
             # pygame.draw.rect(surface, self.bg_color, self.rect, border_radius=self.corner_radius)
-            Draw.draw_rect_alpha(surface, 
-                                 color=self.bg_color,
-                                 rect=self.rect, 
-                                 corner_radius=self.corner_radius,
-                                 width=self.border_width
-                                 )
+            Draw.draw_rect_alpha(
+                surface,
+                color=self.bg_color,
+                rect=self.rect,
+                corner_radius=self.corner_radius,
+                width=self.border_width,
+            )
             for child in self.children:
                 child.render(surface)
 
@@ -113,7 +132,13 @@ class UIContainer(UICanvas):
             for ui_element in self.children:
                 ui_element.update(dt)
 
-    def pack(self, side: str, padx: int = 0, pady: int = 0, modify_dimensions_to_fit=True):
+    def pack(
+        self,
+        side: str = "vert",
+        padx: int = 0,
+        pady: int = 0,
+        modify_dimensions_to_fit=True,
+    ):
         """
         Makes the children fit nicely inside the parent. Width or Height might get modified to fit in the frame.
         :param side: vert or horiz
@@ -129,22 +154,24 @@ class UIContainer(UICanvas):
         s = side.lower()
         if s == "vert":
             # Not very stonks
-            self.parent.height = sum(
-                child.height + pady for child in self.parent.children) + pady
-            self.x = self.parent.x + padx
-            if modify_dimensions_to_fit:
-                self.width = self.parent.width - 2 * padx
-            if len(self.parent.children) > 1:
-                # This now should work fine
-                last_child = self.parent.children[-2] # -1 is the current element
-                self.y = last_child.y + last_child.height + pady
-            else:
-                self.y = self.parent.y + pady
+            self.height = sum(child.height + pady for child in self.children) + pady
+            for i, c in enumerate(self.children):
+                c.x = self.x + padx
+                if modify_dimensions_to_fit:
+                    c.width = self.width - 2 * padx
+                if i > 0:
+                    last_child = self.children[i - 1]
+                    c.y = last_child.y + last_child.height + pady
+                else:
+                    c.y = self.y + pady
+                c.rect.update(c.x, c.y, c.width, c.height)
 
+        # TODO: rewrite
         elif s == "horiz":
             # Not very stonks
-            self.parent.width = sum(
-                child.width + padx for child in self.parent.children) + padx
+            self.parent.width = (
+                sum(child.width + padx for child in self.parent.children) + padx
+            )
             self.y = self.parent.y + pady
             if modify_dimensions_to_fit:
                 self.height = self.parent.height - 2 * pady
@@ -154,19 +181,29 @@ class UIContainer(UICanvas):
                 self.x = self.parent.x + padx
 
         self.rect.update(self.x, self.y, self.width, self.height)
-        self.parent.rect.update(
-            self.parent.x, self.parent.y, self.parent.width, self.parent.height)
-        
+
     def clear(self):
         self.children.clear()
 
 
 class UIElement(UIContainer):
-    def __init__(self, parent: UICanvas = None, x=0, y=0, center=None, width=None, height=None,
-                 bg_color: tuple | str = (40, 40, 40),
-                 fg_color=(0, 0, 0), font: pygame.font.Font | None = None, text: str = "", corner_radius=10):
-        super().__init__(parent, x, y, center, width,
-                         height, bg_color, fg_color, font, corner_radius)
+    def __init__(
+        self,
+        parent: UICanvas = None,
+        x=0,
+        y=0,
+        center=None,
+        width=None,
+        height=None,
+        bg_color: tuple | str = (40, 40, 40),
+        fg_color=(0, 0, 0),
+        font: pygame.font.Font | None = None,
+        text: str = "",
+        corner_radius=10,
+    ):
+        super().__init__(
+            parent, x, y, center, width, height, bg_color, fg_color, font, corner_radius
+        )
 
         self.clickable: bool = False
         self.text = text

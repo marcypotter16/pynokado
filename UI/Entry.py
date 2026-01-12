@@ -1,4 +1,5 @@
 import pygame
+import pyperclip
 
 from UI.Abstract import UIElement, UICanvas
 from Utils.Text import draw_centered_text
@@ -6,16 +7,75 @@ from Utils.Timer import Timer, SpacedCallback
 
 from Game import Game
 
-ALLOWED_SPECIAL_CHARS = [" ", ".", ",", "!", "?", ":", ";", "-", "_", "+", "=",
-                         "(", ")", "[", "]", "{", "}", "<", ">", "/", "\\", "|", "*", "&", "%", "$", "#", "@", "'", '"', "`", "^", "~"]
+ALLOWED_SPECIAL_CHARS = [
+    " ",
+    ".",
+    ",",
+    "!",
+    "?",
+    ":",
+    ";",
+    "-",
+    "_",
+    "+",
+    "=",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    "<",
+    ">",
+    "/",
+    "\\",
+    "|",
+    "*",
+    "&",
+    "%",
+    "$",
+    "#",
+    "@",
+    "'",
+    '"',
+    "`",
+    "^",
+    "~",
+]
 
 
 class Entry(UIElement):
-    def __init__(self, parent: UICanvas = None, x=0, y=0, center=None, width=100, height=100, bg_color: tuple | str = (50, 50, 50),
-                 fg_color=(0, 0, 0), font=None, placeholder: str = "", border_width=1, corner_radius=10, focus_color=(150, 150, 150), is_password=False):
+    def __init__(
+        self,
+        parent: UICanvas = None,
+        x=0,
+        y=0,
+        center=None,
+        width=100,
+        height=100,
+        bg_color: tuple | str = (50, 50, 50),
+        fg_color=(0, 0, 0),
+        font=None,
+        placeholder: str = "",
+        border_width=1,
+        corner_radius=10,
+        focus_color=(150, 150, 150),
+        is_password=False,
+    ):
 
-        super().__init__(parent, x, y, center, width, height,
-                         bg_color, fg_color, font, placeholder, corner_radius)
+        super().__init__(
+            parent,
+            x,
+            y,
+            center,
+            width,
+            height,
+            bg_color,
+            fg_color,
+            font,
+            placeholder,
+            corner_radius,
+        )
         self.border_width = border_width
         self.focused = False
         self.focus_color = focus_color
@@ -34,11 +94,19 @@ class Entry(UIElement):
     def render(self, surface: pygame.Surface):
         if self.visible:
             super().render(surface)
-            pygame.draw.rect(surface, self.fg_color, self.rect,
-                             width=self.border_width, border_radius=self.corner_radius)
-            text = '*'*len(self.text) if self.is_password else self.text
-            draw_centered_text(self.font, surface, text,
-                               self.fg_color, self.rect)
+            pygame.draw.rect(
+                surface, self.bg_color, self.rect, border_radius=self.corner_radius
+            )
+            pygame.draw.rect(
+                surface,
+                self.fg_color,
+                self.rect,
+                width=self.border_width,
+                border_radius=self.corner_radius,
+            )
+            text = "*" * len(self.text) if self.is_password else self.text
+            if text:  # Only draw if there's text to display
+                draw_centered_text(self.font, surface, text, self.fg_color, self.rect)
 
             # Render caret
             self.caret.render(surface)
@@ -58,12 +126,15 @@ class Entry(UIElement):
                         self._handle_arrow_left()
                     elif self.key_pressed == pygame.K_RIGHT:
                         self._handle_arrow_right()
-                    elif self.key_pressed.isalnum() or self.key_pressed in ALLOWED_SPECIAL_CHARS:
+                    elif (
+                        self.key_pressed.isalnum()
+                        or self.key_pressed in ALLOWED_SPECIAL_CHARS
+                    ):
                         self._handle_printable(self.key_pressed)
-                self.key_pressed_timer.update(dt)
+                self.key_pressed_timer.update()
 
             if self.game.clicked_sx == -1:
-                if self.rect.collidepoint(self.game.mousepos):
+                if self.rect.collidepoint(self.game.cursorpos):
                     self.focused = True
                     self.fg_color = self.focus_color
                     self.game.need_key_event_handling = False
@@ -93,7 +164,10 @@ class Entry(UIElement):
                                 if self.text[self.caret.index_in_text - 1] == " ":
                                     self._handle_backspace()
                                     return
-                                while self.caret.index_in_text > 0 and self.text[self.caret.index_in_text - 1] != " ":
+                                while (
+                                    self.caret.index_in_text > 0
+                                    and self.text[self.caret.index_in_text - 1] != " "
+                                ):
                                     self._handle_backspace()
 
                             if event.key == pygame.K_DELETE:
@@ -102,8 +176,25 @@ class Entry(UIElement):
                                 if self.text[self.caret.index_in_text] == " ":
                                     self._hande_delete()
                                     return
-                                while self.caret.index_in_text < len(self.text) and self.text[self.caret.index_in_text] != " ":
+                                while (
+                                    self.caret.index_in_text < len(self.text)
+                                    and self.text[self.caret.index_in_text] != " "
+                                ):
                                     self._hande_delete()
+
+                            if event.key == pygame.K_v:
+                                self.text = pyperclip.paste()
+                                try:
+                                    surf = self.font.render(
+                                        self.text, True, (255, 255, 255)
+                                    )
+                                    rect = surf.get_rect()
+                                except pygame.error:
+                                    print(f"Error in rendering text: {self.text}")
+                                    self.text = ""
+                                    self.caret.reset_position()
+                                else:
+                                    self.caret.move_to(rect.top, rect.right)
 
                         else:
                             if event.key == pygame.K_BACKSPACE:
@@ -112,6 +203,8 @@ class Entry(UIElement):
 
                             if event.key == pygame.K_DELETE:
                                 # Delete character after the caret position
+                                if event.key == pygame.KMOD_CTRL:
+                                    self.clear_text()
                                 self._hande_delete()
 
                             elif event.key == pygame.K_LEFT:
@@ -120,15 +213,30 @@ class Entry(UIElement):
                             elif event.key == pygame.K_RIGHT:
                                 self._handle_arrow_right()
 
-                            elif event.key == pygame.K_RETURN and self.enter_key_callback:
+                            elif (
+                                event.key == pygame.K_RETURN and self.enter_key_callback
+                            ):
                                 self.enter_key_callback()
 
-                            elif event.unicode.isalnum() or event.unicode in ALLOWED_SPECIAL_CHARS:
+                            elif (
+                                event.unicode.isalnum()
+                                or event.unicode in ALLOWED_SPECIAL_CHARS
+                            ):
                                 self._handle_printable(event.unicode)
 
                     if event.type == pygame.KEYUP:
                         self.key_pressed = None
                         self.key_pressed_timer.stop()
+
+    def pack(self):
+        surf = self.font.render(self.text, True, (255, 255, 255))
+        rect = surf.get_rect()
+        center = self.rect.center
+        self.rect.size = rect.size
+        self.rect.center = center
+        self.rect.width += 10
+        self.rect.height += 10
+        self.width, self.height = rect.size
 
     def clear_text(self):
         self.text = ""
@@ -163,6 +271,10 @@ class Entry(UIElement):
             aux_text.insert(self.caret.index_in_text, char)
             self.text = "".join(aux_text)
             self.caret.add_char(char)
+            # Update rect if needed (This would make the entry scale when exceeding length)
+            # surf, rect = self.font.render(self.text)
+            # if self.rect.width <= rect.width:
+            #     self.rect.width = self.width = rect.width
             self.key_pressed = char
 
     def _handle_arrow_left(self):
@@ -179,15 +291,44 @@ class Entry(UIElement):
 
 
 class Paragraph(Entry):
-    def __init__(self, parent: UICanvas = None, x=0, y=0, center=None, width=100, height=100, bg_color: tuple | str = (50, 50, 50),
-                 fg_color=(0, 0, 0), font=None, placeholder: str = "", border_width=1, corner_radius=10, focus_color=(150, 150, 150), is_password=False):
-        super().__init__(parent, x, y, center, width, height, bg_color, fg_color,
-                         font, placeholder, border_width, corner_radius, focus_color, is_password)
-        
+    def __init__(
+        self,
+        parent: UICanvas = None,
+        x=0,
+        y=0,
+        center=None,
+        width=100,
+        height=100,
+        bg_color: tuple | str = (50, 50, 50),
+        fg_color=(0, 0, 0),
+        font=None,
+        placeholder: str = "",
+        border_width=1,
+        corner_radius=10,
+        focus_color=(150, 150, 150),
+        is_password=False,
+    ):
+        super().__init__(
+            parent,
+            x,
+            y,
+            center,
+            width,
+            height,
+            bg_color,
+            fg_color,
+            font,
+            placeholder,
+            border_width,
+            corner_radius,
+            focus_color,
+            is_password,
+        )
+
         self.lines = ["" for _ in range(height // self.font.get_height())]
         self.line_index = 0
         self.line_height = self.font.get_height()
-        
+
     def _handle_printable(self, char):
         txt = self.lines[self.line_index]
         if self.font.size(txt)[0] <= self.width - 40:
@@ -210,14 +351,30 @@ class Paragraph(Entry):
     def get_text(self):
         return "\n".join(l for l in self.lines if l != "")
 
-
     def render(self, surface: pygame.Surface):
         if self.visible:
-            pygame.draw.rect(surface, self.bg_color, self.rect, width=self.border_width, border_radius=self.corner_radius)
+            pygame.draw.rect(
+                surface,
+                self.bg_color,
+                self.rect,
+                width=self.border_width,
+                border_radius=self.corner_radius,
+            )
             self.caret.render(surface)
             for i, line in enumerate(self.lines):
-                draw_centered_text(self.font, surface, line, self.fg_color,
-                                   pygame.Rect(self.rect.x, self.rect.y + i * self.line_height, self.rect.width, self.line_height))
+                draw_centered_text(
+                    self.font,
+                    surface,
+                    line,
+                    self.fg_color,
+                    pygame.Rect(
+                        self.rect.x,
+                        self.rect.y + i * self.line_height,
+                        self.rect.width,
+                        self.line_height,
+                    ),
+                )
+
 
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -239,7 +396,6 @@ class Caret:
 
         self.hiding = False
 
-
         # abc|defg <- index_in_text = 3
         # |abcdefg <- index_in_text = 0
         # abcdefg| <- index_in_text = 7 = len(text)
@@ -250,21 +406,25 @@ class Caret:
     def reset_position(self):
         # self.offset = pygame.Vector2((self.parent.rect.width * .5 + self.parent.font.size(
         #     self.parent.text)[0] * .5, (self.parent.rect.height - self.parent.font.get_height()) // 2 - 3))
-        self.offset = pygame.Vector2((self.parent.rect.width * .5 + self.font.size(
-            self.parent.text)[0] * .5, (self.parent.rect.h - self.font.get_height()) * .5 - 3))
+        self.offset = pygame.Vector2(
+            (
+                self.parent.rect.width * 0.5
+                + self.font.size(self.parent.text)[0] * 0.5,
+                (self.parent.rect.h - self.font.get_height()) * 0.5 - 3,
+            )
+        )
 
         self.topleft: pygame.Vector2 = self.parent.rect.topleft + self.offset
-        self.rect = pygame.Rect(
-            self.topleft, (2, self.parent.font.get_height() + 6))
+        self.rect = pygame.Rect(self.topleft, (2, self.parent.font.get_height() + 6))
         self.index_in_text = len(self.parent.text)
 
     def add_char(self, char):
-        self.topleft += pygame.Vector2(self.parent.font.size(char)[0] * .5, 0)
-        self.rect.topleft = self.topleft
+        self.topleft += pygame.Vector2(self.parent.font.size(char)[0] * 0.5, 0)
+        self.rect.update(self.topleft, self.rect.size)
         self.index_in_text += 1
 
     def remove_char(self, char):
-        self.topleft -= pygame.Vector2(self.parent.font.size(char)[0] * .5, 0)
+        self.topleft -= pygame.Vector2(self.parent.font.size(char)[0] * 0.5, 0)
         self.rect.topleft = self.topleft
         self.index_in_text -= 1
 
@@ -289,7 +449,7 @@ class Caret:
 
     def update(self, dt):
         if not self.hiding:
-            self.blink.update(dt)
+            self.blink.update()
             # print("Caret position:", self.topleft, self.index_in_text)
 
     def render(self, surface: pygame.Surface):
