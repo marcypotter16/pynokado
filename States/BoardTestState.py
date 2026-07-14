@@ -1,26 +1,27 @@
 import os
+import random
 
 import pygame as p
 
 from AllCards import ALL_CARDS
-from Models.Card import Card, make_stone
+from Models.Card import Card, make_stone, _tint_ink
 from States.State import State
 from Utils.Text import draw_centered_text
 
 
 class BoardTestState(State):
     """
-    A Go-inspired board test. A 7x7 grid of line intersections sits on the paper
-    background; cards are dealt into a hand at the bottom. Drag a card near an
-    intersection and release to place it: the card snaps (tweens) to the nearest
-    empty point and becomes a round "stone" showing its art. Drop it anywhere
-    invalid and it tweens back to its hand slot.
+    A Go-inspired board test. A 10x10 grid of brush-stroke line intersections
+    sits on the paper background; cards are dealt into a hand at the bottom.
+    Drag a card near an intersection and release to place it: the card snaps
+    (tweens) to the nearest empty point and becomes a round "stone" showing its
+    art. Drop it anywhere invalid and it tweens back to its hand slot.
     """
 
-    GRID = 7                 # 7x7 intersections
-    CELL = 96                # pixels between adjacent intersections
-    STONE_D = 84             # placed-stone diameter
-    SNAP_DIST = 70           # how close to a point a drop must be to place
+    GRID = 10                # 10x10 intersections
+    CELL = 72                # pixels between adjacent intersections
+    STONE_D = 64             # placed-stone diameter
+    SNAP_DIST = 52           # how close to a point a drop must be to place
 
     def __init__(self, game, msg=None, layer="foreground"):
         super().__init__(game, msg, layer, bg_color=(235, 232, 224))
@@ -70,6 +71,10 @@ class BoardTestState(State):
         self.hud_font = game.fonts["comfortaa"]["small"]
         self.title_font = game.fonts["sigokae"]["big"]
         self.ink = (30, 26, 22)
+
+        # Bake the brush-stroke board onto a surface once (it never changes),
+        # so we don't re-blit ~40 rotated/scaled strokes every frame.
+        self.board_surface = self._build_board_surface()
 
         # GPU hover-glow pass for hand cards.
         game.post_render_callbacks.append(self._render_hover_glow)
@@ -139,7 +144,7 @@ class BoardTestState(State):
         super().render(surface)
         surface.blit(self.paper, (0, 0))
 
-        self._draw_board(surface)
+        surface.blit(self.board_surface, (0, 0))
 
         # Placed stones.
         for stone in self.stones.values():
@@ -176,23 +181,65 @@ class BoardTestState(State):
         else:
             card.render(surface)
 
-    def _draw_board(self, surface):
+    # Sliced brush strokes, widest -> thinnest (measured from lines.png).
+    BORDER_STROKES = ["board_line_0.png", "board_line_2.png"]   # bigger
+    INNER_STROKES = ["board_line_1.png", "board_line_3.png",
+                     "board_line_4.png", "board_line_5.png"]    # thinner
+
+    def _build_board_surface(self) -> p.Surface:
+        """Bake the 10x10 board from tinted brush strokes onto one surface.
+        Each grid line is a scaled (and rotated for horizontals) stroke sprite
+        with small seeded jitter, so the board looks hand-painted but is stable
+        frame-to-frame. Border lines use the bigger strokes."""
+        surf = p.Surface((self.game.GAME_W, self.game.GAME_H), p.SRCALPHA)
         span = (self.GRID - 1) * self.CELL
         o = self.board_origin
-        # Grid lines.
-        for i in range(self.GRID):
-            # horizontal
-            p.draw.line(surface, self.ink,
-                        (o.x, o.y + i * self.CELL),
-                        (o.x + span, o.y + i * self.CELL), 2)
-            # vertical
-            p.draw.line(surface, self.ink,
-                        (o.x + i * self.CELL, o.y),
-                        (o.x + i * self.CELL, o.y + span), 2)
-        # Intersection dots.
+        rng = random.Random(1337)   # fixed seed -> stable board
+
+        ui = os.path.join(self.game.assets_dir, "sprites", "ui", "board_lines")
+
+        def tinted(name):
+            img = p.image.load(os.path.join(ui, name)).convert_alpha()
+            return _tint_ink(img, self.ink)
+
+        border = [tinted(n) for n in self.BORDER_STROKES]
+        inner = [tinted(n) for n in self.INNER_STROKES]
+
+        def stroke_for(is_border):
+            return rng.choice(border if is_border else inner)
+
+        def blit_line(fixed, lo, hi, is_border, horizontal):
+            """Draw one grid line. `fixed` is the constant coordinate (x for a
+            vertical line, y for a horizontal one); the line runs from `lo` to
+            `hi` along the other axis."""
+            src = stroke_for(is_border)
+            length = hi - lo
+            grow = rng.randint(6, 20)          # slight overshoot past endpoints
+            stroke = p.transform.smoothscale(src, (src.get_width(), length + grow))
+            if rng.random() < 0.5:             # organic: flip half of them
+                stroke = p.transform.flip(stroke, True, False)
+            if horizontal:
+                stroke = p.transform.rotate(stroke, 90)
+            jitter = rng.randint(-2, 2)        # perpendicular nudge
+            mid = lo + length / 2
+            center = (mid, fixed + jitter) if horizontal else (fixed + jitter, mid)
+            surf.blit(stroke, stroke.get_rect(center=center))
+
+        # Vertical lines (columns): fixed x, running down y.
+        for c in range(self.GRID):
+            x = o.x + c * self.CELL
+            blit_line(x, o.y, o.y + span, c in (0, self.GRID - 1), horizontal=False)
+        # Horizontal lines (rows): fixed y, running across x.
+        for r in range(self.GRID):
+            y = o.y + r * self.CELL
+            blit_line(y, o.x, o.x + span, r in (0, self.GRID - 1), horizontal=True)
+
+        # Small ink dots at intersections for definition.
         for row in self.points:
             for pt in row:
-                p.draw.circle(surface, self.ink, (int(pt.x), int(pt.y)), 4)
+                p.draw.circle(surf, self.ink, (int(pt.x), int(pt.y)), 3)
+
+        return surf
 
     # -------------------------------------------------------- hover glow pass
     def _render_hover_glow(self):
