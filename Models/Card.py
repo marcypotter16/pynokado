@@ -7,11 +7,12 @@ from Utils.Text import draw_centered_text
 
 
 # Per-faction accent used to tint the ink brush strokes (frame + enso).
-# Palette: Steel Azure / Golden Glow / Black Cherry.
+# Palette: Steel Azure / Chocolate / Black Cherry.
+# (Golden Glow #dec62b is reserved for a future strong-glow effect.)
 FACTION_INK = {
     "tech":    (4, 67, 137),    # #044389 Steel Azure
     "monster": (100, 13, 20),   # #640d14 Black Cherry
-    "ancient": (222, 198, 43),  # #dec62b Golden Glow
+    "ancient": (139, 71, 4),    # #8b4704 Chocolate
 }
 DEFAULT_INK = (18, 16, 14)
 
