@@ -27,6 +27,20 @@ def _cover_scale(img: p.Surface, target_w: int, target_h: int) -> p.Surface:
     return scaled.subsurface(crop).copy()
 
 
+def _focal_crop(img: p.Surface, d: int, focus: tuple, zoom: float) -> p.Surface:
+    """Cover-scale `img` to a d×d square, but zoomed by `zoom` and centred on the
+    `focus` point (fx, fy in 0..1 of the source). Used to frame a card's face /
+    focal detail for its round board icon instead of a plain centre crop."""
+    iw, ih = img.get_size()
+    scale = max(d / iw, d / ih) * max(1.0, zoom)
+    sc = p.transform.smoothscale(img, (round(iw * scale), round(ih * scale)))
+    sw, sh = sc.get_size()
+    cx, cy = int(focus[0] * sw), int(focus[1] * sh)
+    crop = p.Rect(cx - d // 2, cy - d // 2, d, d)
+    crop.clamp_ip(p.Rect(0, 0, sw, sh))     # keep inside the scaled image
+    return sc.subsurface(crop).copy()
+
+
 def _tint_ink(img: p.Surface, color: tuple) -> p.Surface:
     """Recolour a black-on-transparent brush sprite to `color`, preserving its
     alpha (the brush texture)."""
@@ -59,14 +73,23 @@ def make_stone(game: Game, card_model: "CardModel", diameter: int,
     art_frac = min(hole.width, hole.height) / min(ring_src.get_size())
     art_d = max(4, int(d * art_frac))
 
-    # Circular art fill, centred on the stone.
-    art = _cover_scale(p.image.load(card_model.art_path).convert_alpha(),
-                       art_d, art_d)
+    # Light backing disc so the dark ink art pops against the paper.
+    off = (d - art_d) // 2
+    p.draw.circle(surf, (246, 243, 236), (d // 2, d // 2), art_d // 2)
+
+    # Focal art crop (zoom to the card's face / focal detail), masked to a disc.
+    art = _focal_crop(p.image.load(card_model.art_path).convert_alpha(),
+                      art_d, card_model.icon_focus, card_model.icon_zoom)
     mask = p.Surface((art_d, art_d), p.SRCALPHA)
     p.draw.circle(mask, (255, 255, 255, 255), (art_d // 2, art_d // 2), art_d // 2)
     art.blit(mask, (0, 0), special_flags=p.BLEND_RGBA_MULT)
-    surf.blit(art, ((d - art_d) // 2, (d - art_d) // 2))
+    surf.blit(art, (off, off))
 
+    # Strong faction ring: a solid tinted circle under the brush ring makes the
+    # faction read even when the icon is ambiguous.
+    ring_col = tuple(min(255, c + 55) for c in ink)
+    p.draw.circle(surf, ring_col, (d // 2, d // 2), art_d // 2 + 2,
+                  width=max(3, d // 20))
     # Faction-tinted brush ring on top (now centred).
     ring = _tint_ink(p.transform.smoothscale(ring_src, (d, d)), ink)
     surf.blit(ring, (0, 0))
@@ -154,11 +177,18 @@ class CardModel:
         strength: int,
         name: str = "",
         faction: str = "",
+        icon_focus: tuple[float, float] = (0.5, 0.5),
+        icon_zoom: float = 1.0,
     ):
         self.art_path = art_path
         self.strength = strength
         self.name = name
         self.faction = faction
+        # For the round board stone: which part of the art to frame, and how
+        # far to zoom in. (0.5, 0.5)/1.0 = centred, full (current behaviour);
+        # e.g. (0.5, 0.3)/1.9 zooms to a face in the upper-middle.
+        self.icon_focus = icon_focus
+        self.icon_zoom = icon_zoom
 
 
 class CardModelNotFoundError(SyntaxError):

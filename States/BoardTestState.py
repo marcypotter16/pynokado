@@ -20,7 +20,7 @@ class BoardTestState(State):
 
     GRID = 10                # 10x10 intersections
     CELL = 72                # pixels between adjacent intersections
-    STONE_D = 64             # placed-stone diameter
+    STONE_D = 76             # placed-stone diameter
     SNAP_DIST = 52           # how close to a point a drop must be to place
 
     def __init__(self, game, msg=None, layer="foreground"):
