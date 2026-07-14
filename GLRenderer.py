@@ -28,7 +28,10 @@ void main() {
 }
 """
 
-# Simple texture pass-through fragment shader
+# Pass-through fragment shader. The game texture is uploaded straight from the
+# pygame surface buffer (no CPU convert/flip), which means:
+#   * pixels arrive as BGRA (surface native order) -> swizzle .bgra to RGBA
+#   * the buffer is top-row-first while GL samples bottom-up -> flip V
 WINDOW_SCALING_FRAG_SRC = """
 #version 330
 
@@ -37,7 +40,9 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-    fragColor = texture(tex, v_uv);
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);   // flip vertically
+    fragColor = texture(tex, uv).bgra;      // BGRA -> RGBA, force opaque below
+    fragColor.a = 1.0;                       // surface has no alpha channel
 }
 """
 
@@ -180,10 +185,19 @@ class GLRenderer:
     def upload_surface(self, surface: p.Surface):
         """Upload a pygame surface to the game texture.
 
+        Fast path: hand the surface's raw pixel buffer straight to the GPU with
+        NO CPU copy. `p.image.tobytes(surface, "RGBA", True)` allocated and
+        serialised an ~8 MB byte string every frame (~11 ms at 1080p) *and*
+        flipped it on the CPU -- it was over half the frame time even when idle.
+
+        The trade: get_buffer() gives raw memory in the surface's native order
+        (BGRA on little-endian) and does NOT flip vertically. So we fix both in
+        the fragment shader instead: sample .bgra and invert the V coordinate.
+
         Args:
             surface: Pygame surface to upload (should match game_size)
         """
-        self.game_texture.write(p.image.tobytes(surface, "RGBA", True))
+        self.game_texture.write(surface.get_buffer())
 
     def render(self, clear_color: tuple = (0.0, 0.0, 0.0, 1.0)):
         """Render the game texture to screen.
@@ -196,47 +210,41 @@ class GLRenderer:
         self.game_texture.use(0)
         self.quad_vao.render(moderngl.TRIANGLE_STRIP)
 
-    # Set True to print the exact per-frame glow parameters (debugging #2).
-    DEBUG_GLOW = True
+    MAX_GLOW_CARDS = 12  # must match MAX_CARDS in hover_glow.glsl
 
-    def render_glow(
+    def render_glows(
         self,
-        rect_px: tuple[float, float, float, float],
-        color: tuple[float, float, float],
+        cards: list,
         time_s: float,
-        intensity: float = 1.0,
-        radius_px: float = 60.0,
+        radius_px: float = 70.0,
     ):
-        """Additive hover-glow pass around a card rect (all in game pixels,
-        top-left origin). No-op if the shader failed to load or intensity ~0."""
-        if self.glow_vao is None or intensity <= 0.001:
+        """Single additive glow pass for ALL lifted cards. `cards` is a list of
+        (rect_px, color, intensity) tuples -- rect in game pixels, top-left
+        origin. One draw call; each card's glow fades with its own intensity so
+        moving between cards cross-fades. No-op if the shader is missing or no
+        card is lit."""
+        if self.glow_vao is None or not cards:
             return
+        cards = cards[: self.MAX_GLOW_CARDS]
         prog = self.programs["hover_glow"]
         self.ctx.viewport = self.viewport
-        self.game_texture.use(0)
-        if "tex" in prog:
-            prog["tex"].value = 0
+
+        # Pack the whole fixed-size arrays (zero-padded) and upload in one write
+        # each -- moderngl uniform arrays are set wholesale, not per-index.
+        n = self.MAX_GLOW_CARDS
+        rects = array([[0, 0, 0, 0]] * n, dtype="f4")
+        colors = array([[0, 0, 0]] * n, dtype="f4")
+        intensities = array([0] * n, dtype="f4")
+        for i, (rect, color, intensity) in enumerate(cards):
+            rects[i] = rect
+            colors[i] = color
+            intensities[i] = intensity
+
         prog["u_res"].value = (float(self.game_w), float(self.game_h))
-        prog["u_rect"].value = tuple(float(v) for v in rect_px)
-        prog["u_color"].value = tuple(float(c) for c in color)
         prog["u_time"].value = float(time_s)
-        prog["u_intensity"].value = float(intensity)
         prog["u_radius"].value = float(radius_px)
+        prog["u_count"].value = len(cards)
+        prog["u_rects"].write(rects.tobytes())
+        prog["u_colors"].write(colors.tobytes())
+        prog["u_intensities"].write(intensities.tobytes())
         self.glow_vao.render(moderngl.TRIANGLE_STRIP)
-
-        if self.DEBUG_GLOW:
-            import math
-            # Mirror the shader math so we can see what the glow peak should be.
-            t32 = self._as_f32(time_s)  # what the GPU actually receives
-            pulse = 0.75 + 0.25 * math.sin(t32 * 3.0)
-            peak = pulse * intensity
-            print(f"[glow] u_time={time_s:12.4f} (f32={t32:12.4f})  "
-                  f"pulse={pulse:.4f}  intensity(lift)={intensity:.4f}  "
-                  f"peak_alpha={peak:.4f}  rect={tuple(round(v) for v in rect_px)}")
-
-    @staticmethod
-    def _as_f32(x: float) -> float:
-        """Round-trip a Python float through float32 to see the precision the
-        GPU sees (GLSL uniforms are 32-bit)."""
-        import struct
-        return struct.unpack("f", struct.pack("f", x))[0]
