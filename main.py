@@ -1,7 +1,6 @@
 from Game import Game
-from States.BezierTestState import BezierTestState
-from States.CardTestState import CardTestState
+from States.CardShowcaseState import CardShowcaseState
 
 g: Game = Game()
-g.push_state(CardTestState(g))
+g.push_state(CardShowcaseState(g))
 g.game_loop()

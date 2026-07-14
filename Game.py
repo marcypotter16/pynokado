@@ -84,6 +84,7 @@ class Game:
         self.clicked_sx: int = 0
         self.clicked_dx: int = 0
         self.dt, self.prev_time = 0, 0
+        self.elapsed = 0.0  # seconds since start, for shader animation
         self.state_stack = Stack()
 
         self.tweener_manager: TweenManager = TweenManager()
@@ -250,6 +251,10 @@ class Game:
         now = time.time()
         self.dt = now - self.prev_time if self.prev_time > 0 else 0
         self.prev_time = now
+        # Small, monotonically-increasing clock for shaders. Wall-clock
+        # (prev_time ~1.7e9) has too little float32 precision left for smooth
+        # per-frame animation, so accumulate elapsed seconds near zero instead.
+        self.elapsed += self.dt
 
     def load_assets(self):
         # TODO
@@ -270,16 +275,38 @@ class Game:
             "press_start": ("PressStart.ttf", [30, 16, 10, 6]),
             "ant": ("AntykwaTorunska-Regular.otf", [45, 25, 20, 10]),
             "stix": ("STIXTwoMath-Regular.otf", [0, 0, 0, 0]),
+            # Drop the real files in Assets/font/ with these names (or adjust
+            # the filenames here). Missing files fall back to the default font.
+            "inconsolata": ("InconsolataNerdFont-Regular.ttf", [40, 22, 16, 11]),
+            "ghibli": ("Ghibli.otf", [40, 22, 16, 11]),
+            # --- brush / ink faces (good for this ink-wash card style) ---
+            "kashima": ("Kashima.otf", [40, 22, 16, 11]),
+            "korean_calligraphy": ("KoreanCalligraphy.ttf", [40, 22, 16, 11]),
+            "mgs4_brush": ("MGS4Brush.ttf", [40, 22, 16, 11]),
+            "sigokae": ("Sigokae.ttf", [40, 22, 16, 11]),
+            "harukaze": ("Harukaze.ttf", [60, 42, 36, 20]),
+            # --- handwritten / script ---
+            "biro_script": ("BiroScript.ttf", [40, 22, 16, 11]),
+            "handmade": ("Handmade.otf", [40, 22, 16, 11]),
+            "hogback": ("Hogback.otf", [40, 22, 16, 11]),
+            "sandwich": ("Sandwich.otf", [40, 22, 16, 11]),
+            # --- themed (e.g. a real in-game shop screen) ---
+            "chinese_watch_shop": ("ChineseWatchShop.ttf", [60, 42, 36, 20]),
         }
 
         sizes = ["big", "medium", "small", "tiny"]
 
-        # Load fonts
+        # Load fonts (missing files degrade to pygame's default font instead of
+        # crashing, so the font-switch keeps working before assets land).
         for font_name, (filename, font_sizes) in font_configs.items():
             self.fonts[font_name] = {}
+            path = os.path.join(self.font_dir, filename)
+            exists = os.path.isfile(path)
+            if not exists:
+                print(f"[Font] '{filename}' not found - using default for '{font_name}'")
             for i, size_name in enumerate(sizes):
-                font = p.font.Font(os.path.join(self.font_dir, filename), font_sizes[i])
-                self.fonts[font_name][size_name] = font
+                src = path if exists else None
+                self.fonts[font_name][size_name] = p.font.Font(src, font_sizes[i])
 
         # Legacy properties for backward compatibility
         self.font_medium = self.fonts["comfortaa"]["medium"]

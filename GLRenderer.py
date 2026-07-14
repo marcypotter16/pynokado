@@ -80,11 +80,27 @@ class GLRenderer:
         except FileNotFoundError:
             print("[Warning] Buff Shader file not found")
 
+        # Optional hover-glow shader (additive pass around a hovered card).
+        try:
+            glow_frag = _load_shader("hover_glow.glsl")
+            self.programs["hover_glow"] = ctx.program(
+                vertex_shader=VERT_SRC,
+                fragment_shader=glow_frag,
+            )
+        except FileNotFoundError:
+            print("[Warning] Hover-glow shader file not found")
+
         # Create fullscreen quad
         self.quad_vbo = self._create_quad_vbo()
         self.quad_vao = self.ctx.simple_vertex_array(
             self.programs["window_scaling"], self.quad_vbo, "in_pos", "in_uv"
         )
+        # Separate VAO bound to the glow program (each program needs its own).
+        self.glow_vao = None
+        if "hover_glow" in self.programs:
+            self.glow_vao = self.ctx.simple_vertex_array(
+                self.programs["hover_glow"], self.quad_vbo, "in_pos", "in_uv"
+            )
 
         # Scaling values (set by set_viewport)
         self.viewport = (0, 0, self.game_w, self.game_h)
@@ -179,3 +195,48 @@ class GLRenderer:
         self.ctx.clear(*clear_color)
         self.game_texture.use(0)
         self.quad_vao.render(moderngl.TRIANGLE_STRIP)
+
+    # Set True to print the exact per-frame glow parameters (debugging #2).
+    DEBUG_GLOW = True
+
+    def render_glow(
+        self,
+        rect_px: tuple[float, float, float, float],
+        color: tuple[float, float, float],
+        time_s: float,
+        intensity: float = 1.0,
+        radius_px: float = 60.0,
+    ):
+        """Additive hover-glow pass around a card rect (all in game pixels,
+        top-left origin). No-op if the shader failed to load or intensity ~0."""
+        if self.glow_vao is None or intensity <= 0.001:
+            return
+        prog = self.programs["hover_glow"]
+        self.ctx.viewport = self.viewport
+        self.game_texture.use(0)
+        if "tex" in prog:
+            prog["tex"].value = 0
+        prog["u_res"].value = (float(self.game_w), float(self.game_h))
+        prog["u_rect"].value = tuple(float(v) for v in rect_px)
+        prog["u_color"].value = tuple(float(c) for c in color)
+        prog["u_time"].value = float(time_s)
+        prog["u_intensity"].value = float(intensity)
+        prog["u_radius"].value = float(radius_px)
+        self.glow_vao.render(moderngl.TRIANGLE_STRIP)
+
+        if self.DEBUG_GLOW:
+            import math
+            # Mirror the shader math so we can see what the glow peak should be.
+            t32 = self._as_f32(time_s)  # what the GPU actually receives
+            pulse = 0.75 + 0.25 * math.sin(t32 * 3.0)
+            peak = pulse * intensity
+            print(f"[glow] u_time={time_s:12.4f} (f32={t32:12.4f})  "
+                  f"pulse={pulse:.4f}  intensity(lift)={intensity:.4f}  "
+                  f"peak_alpha={peak:.4f}  rect={tuple(round(v) for v in rect_px)}")
+
+    @staticmethod
+    def _as_f32(x: float) -> float:
+        """Round-trip a Python float through float32 to see the precision the
+        GPU sees (GLSL uniforms are 32-bit)."""
+        import struct
+        return struct.unpack("f", struct.pack("f", x))[0]
