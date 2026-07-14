@@ -15,34 +15,41 @@ uniform vec3  u_colors[MAX_CARDS];       // per-card glow colour (0..1)
 uniform float u_intensities[MAX_CARDS];  // per-card strength (lift, 0..1)
 uniform float u_corners[MAX_CARDS];      // per-shape corner radius (px). Set to
                                          // >= min(w,h)/2 for a circle.
-uniform float u_falloffs[MAX_CARDS];     // per-shape glow band width (px). The
-                                         // glow starts AT the shape edge and
-                                         // fades out over this distance.
+uniform float u_falloffs[MAX_CARDS];     // per-shape glow band width (px)
+uniform float u_fills[MAX_CARDS];        // 0 = border band (glow only OUTSIDE
+                                         // the edge); 1 = filled (glow fills
+                                         // the whole inside AND bleeds out).
 uniform float u_time;                    // seconds, for the pulse
 
 in vec2 v_uv;
 out vec4 fragColor;
 
-// Glow contribution of one shape at pixel `px`, as premultiplied RGBA. The
-// glow band begins exactly at the shape's edge (dist == 0) and fades out over
-// `falloff` px. `corner` rounds the rect; corner >= half the shorter side is a
-// circle (SDF becomes length(px-centre) - radius).
+// Glow contribution of one shape at pixel `px`, as premultiplied RGBA.
+// `corner` rounds the rect; corner >= half the shorter side is a circle
+// (SDF becomes length(px-centre) - radius).
+//   fill == 0: a band OUTSIDE the edge, fading over `falloff` px (border glow).
+//   fill == 1: the whole INTERIOR glows, fading out over `falloff` past the
+//              edge -- reads as the shape being backlit.
 vec4 card_glow(vec2 px, vec4 rect, vec3 color, float intensity,
-               float corner, float falloff) {
+               float corner, float falloff, float fill) {
     vec2 c = rect.xy + rect.zw * 0.5;
     vec2 half_size = rect.zw * 0.5;
     corner = min(corner, min(half_size.x, half_size.y));
 
-    // Signed distance to a rounded box (0 on the border, >0 outside).
+    // Signed distance to a rounded box: <0 inside, 0 on the edge, >0 outside.
     vec2 q = abs(px - c) - (half_size - corner);
-    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - corner;
-    dist = max(dist, 0.0);                        // only the outside band
+    float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - corner;
 
-    float glow = 1.0 - smoothstep(0.0, falloff, dist);
-    glow = pow(glow, 1.6);                        // tighten toward the edge
-    float outside = step(0.001, dist);            // don't wash out the shape
+    // Border-band glow (outside only).
+    float outside = max(sd, 0.0);
+    float band = pow(1.0 - smoothstep(0.0, falloff, outside), 1.6)
+                 * step(0.001, outside);
 
-    float a = glow * intensity * outside;
+    // Filled glow: 1 everywhere inside (sd <= 0), fading out over `falloff`.
+    float filled = 1.0 - smoothstep(0.0, falloff, sd);   // sd<0 -> 1
+
+    float glow = mix(band, filled, fill);
+    float a = glow * intensity;
     return vec4(color * a, a);
 }
 
@@ -58,7 +65,7 @@ void main() {
     for (int i = 0; i < MAX_CARDS; i++) {
         if (i >= u_count) break;
         acc += card_glow(px, u_rects[i], u_colors[i], u_intensities[i],
-                         u_corners[i], u_falloffs[i]);
+                         u_corners[i], u_falloffs[i], u_fills[i]);
     }
     acc *= pulse;
 
