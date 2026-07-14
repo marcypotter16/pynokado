@@ -126,22 +126,16 @@ class CardShowcaseState(State):
                 break
 
     def _render_hover_glow(self):
-        """Post-render GPU pass: glow EVERY lifted card. Glowing only the
-        top-most card made the glow teleport (and pop in already-bright) when
-        the cursor slid from one card to an adjacent one, because the old card's
-        glow vanished instantly instead of fading. Drawing all lifted cards lets
-        each glow fade in/out with its own lift -> continuous transitions."""
-        for card in self.cards:
-            if card.lift <= 0.01:
-                continue
-            r = card.glow_rect
-            self.game.gl_renderer.render_glow(
-                (r.x, r.y, r.w, r.h),
-                card.glow_color,
-                time_s=self.game.elapsed,
-                intensity=card.lift,
-                radius_px=70.0,
-            )
+        """Post-render GPU pass: ONE draw for all lifted cards. Each card's glow
+        fades with its own lift, so sliding between cards cross-fades (no
+        teleport / pop). Glowing all lifted cards in a single array-fed pass
+        also avoids a draw call per card."""
+        glows = [
+            ((c.glow_rect.x, c.glow_rect.y, c.glow_rect.w, c.glow_rect.h),
+             c.glow_color, c.lift)
+            for c in self.cards if c.lift > 0.01
+        ]
+        self.game.gl_renderer.render_glows(glows, time_s=self.game.elapsed)
 
     def render(self, surface):
         super().render(surface)
