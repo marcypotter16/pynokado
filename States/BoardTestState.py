@@ -82,13 +82,13 @@ class BoardTestState(State):
         game.post_render_callbacks.append(self._render_hover_glow)
 
     def _age_parchment(self, paper: p.Surface) -> p.Surface:
-        """Warm the paper to a worn sepia parchment: sepia tint, a gentle worn
-        vignette at the edges, and a few faint stains. Baked once.
+        """Warm the paper to a worn sepia parchment: a sepia tint plus a gentle
+        worn vignette at the edges. (Ink blotches live on the board layer, not
+        here.) Baked once.
 
-        Note: BLEND_MULT ignores the alpha channel, so all darkening layers are
-        built as *fully opaque* gradients/blots (transparent-black would
-        multiply the paper to black squares). Softness comes from the gradient
-        values, not alpha."""
+        Note: BLEND_MULT ignores the alpha channel, so the darkening layers are
+        built as *fully opaque* gradients (transparent-black would multiply the
+        paper to black). Softness comes from the gradient values, not alpha."""
         w, h = paper.get_size()
         out = paper.copy()
 
@@ -107,30 +107,6 @@ class BoardTestState(State):
             v = int(205 + (255 - 205) * (t ** 1.5))          # 205(edge)->255(centre)
             p.draw.circle(vig, (v, v, v), (cx, cy), r)
         out.blit(vig, (0, 0), special_flags=p.BLEND_MULT)
-
-        # Faint irregular stains/foxing: small, soft, barely-there brown
-        # blotches built from a few overlapping soft discs (so they aren't
-        # perfect circles). Multiplied in.
-        rng = random.Random(7)
-        for _ in range(22):
-            r = rng.randint(14, 46)
-            sx, sy = rng.randint(0, w), rng.randint(0, h)
-            pad = r * 2
-            blot = p.Surface((pad * 2, pad * 2)); blot.fill((255, 255, 255))
-            darkness = rng.randint(6, 16)                    # very light
-            # 2-4 overlapping lobes for an irregular edge.
-            for _lobe in range(rng.randint(2, 4)):
-                lx = pad + rng.randint(-r // 2, r // 2)
-                ly = pad + rng.randint(-r // 2, r // 2)
-                lr = rng.randint(r // 2, r)
-                for i in range(10):
-                    t = i / 9
-                    rr = int(lr * (1 - t))
-                    v = int((255 - darkness) + darkness * (t ** 2))
-                    col = tuple(min(255, int(v * c / 255))
-                                for c in (242, 226, 196))
-                    p.draw.circle(blot, col, (lx, ly), rr)
-            out.blit(blot, (sx - pad, sy - pad), special_flags=p.BLEND_MULT)
         return out
 
     # ------------------------------------------------------------- placement
@@ -235,22 +211,18 @@ class BoardTestState(State):
         else:
             card.render(surface)
 
-    # Interior grid lines: the thinner sliced strokes (from lines.png).
+    # Sliced brush strokes, widest -> thinnest (from lines.png).
+    BORDER_STROKES = ["board_line_0.png", "board_line_2.png"]   # bigger
     INNER_STROKES = ["board_line_1.png", "board_line_3.png",
-                     "board_line_4.png", "board_line_5.png"]
-    # Border: the heavy strokes (from thick_lines.png). These are horizontal in
-    # the source; used as-is for the top/bottom, rotated for the sides.
-    BORDER_STROKES = ["thick_line_1.png", "thick_line_5.png", "thick_line_8.png"]
-    # Splat blobs / patches for intersection markers and scattered ink.
-    SPLATS = ["thick_line_3.png"]
-    PATCHES = ["thick_line_0.png", "thick_line_2.png", "thick_line_4.png",
-               "thick_line_6.png", "thick_line_7.png"]
+                     "board_line_4.png", "board_line_5.png"]    # thinner
+    # A single ink blob for the odd scattered splotch.
+    SPLAT = "thick_line_3.png"
 
     def _build_board_surface(self) -> p.Surface:
-        """Bake the 10x10 board from tinted brush strokes onto one surface.
-        Interior lines are thin strokes; the border is heavy strokes; splat
-        blobs mark intersections; and random ink patches/lines are scattered
-        around for a worn, hand-painted look. Seeded -> stable frame-to-frame."""
+        """Bake the 10x10 board from tinted brush strokes onto one surface. Each
+        grid line is a scaled (rotated for horizontals) stroke with seeded
+        jitter; border lines use the bigger strokes. A couple of solid black ink
+        blotches are dropped nearby for character. Seeded -> stable."""
         surf = p.Surface((self.game.GAME_W, self.game.GAME_H), p.SRCALPHA)
         span = (self.GRID - 1) * self.CELL
         o = self.board_origin
@@ -261,19 +233,14 @@ class BoardTestState(State):
             img = p.image.load(os.path.join(ui, subdir, name)).convert_alpha()
             return _tint_ink(img, self.ink)
 
+        border = [tinted("board_lines", n) for n in self.BORDER_STROKES]
         inner = [tinted("board_lines", n) for n in self.INNER_STROKES]
-        border = [tinted("thick_lines", n) for n in self.BORDER_STROKES]
-        splats = [tinted("thick_lines", n) for n in self.SPLATS]
-        patches = [tinted("thick_lines", n) for n in self.PATCHES]
 
-        def blit_line(src, fixed, lo, hi, horizontal, thickness=None):
-            """Draw a line sprite along an axis. `src` is a vertical stroke
-            (taller than wide); it is scaled to the run length, optionally
-            re-widthed to `thickness`, flipped, and rotated for horizontals."""
+        def blit_line(fixed, lo, hi, is_border, horizontal):
+            src = rng.choice(border if is_border else inner)
             length = hi - lo
-            grow = rng.randint(6, 22)
-            w = thickness if thickness else src.get_width()
-            stroke = p.transform.smoothscale(src, (w, length + grow))
+            grow = rng.randint(6, 20)
+            stroke = p.transform.smoothscale(src, (src.get_width(), length + grow))
             if rng.random() < 0.5:
                 stroke = p.transform.flip(stroke, True, False)
             if horizontal:
@@ -283,47 +250,31 @@ class BoardTestState(State):
             center = (mid, fixed + jitter) if horizontal else (fixed + jitter, mid)
             surf.blit(stroke, stroke.get_rect(center=center))
 
-        # Interior lines first (so the heavy border sits on top).
-        for c in range(1, self.GRID - 1):
-            blit_line(rng.choice(inner), o.x + c * self.CELL,
-                      o.y, o.y + span, horizontal=False)
-        for r in range(1, self.GRID - 1):
-            blit_line(rng.choice(inner), o.y + r * self.CELL,
-                      o.x, o.x + span, horizontal=True)
+        # Columns then rows; first/last are the border.
+        for c in range(self.GRID):
+            blit_line(o.x + c * self.CELL, o.y, o.y + span,
+                      c in (0, self.GRID - 1), horizontal=False)
+        for r in range(self.GRID):
+            blit_line(o.y + r * self.CELL, o.x, o.x + span,
+                      r in (0, self.GRID - 1), horizontal=True)
 
-        # Heavy border (the thick strokes rotated into tall bars).
-        bw = 26   # border stroke width when stood upright
-        blit_line(rng.choice(border), o.x, o.y, o.y + span, False, bw)          # left
-        blit_line(rng.choice(border), o.x + span, o.y, o.y + span, False, bw)   # right
-        blit_line(rng.choice(border), o.y, o.x, o.x + span, True, bw)           # top
-        blit_line(rng.choice(border), o.y + span, o.x, o.x + span, True, bw)    # bottom
-
-        # Splat blobs on a scattering of intersections (not all -> organic).
+        # Small ink dots at intersections.
         for row in self.points:
             for pt in row:
-                if rng.random() < 0.22:
-                    s = rng.choice(splats)
-                    d = rng.randint(10, 16)
-                    s = p.transform.smoothscale(s, (d, d))
-                    s.set_alpha(rng.randint(150, 230))
-                    surf.blit(s, s.get_rect(center=(int(pt.x), int(pt.y))))
-                else:
-                    p.draw.circle(surf, self.ink, (int(pt.x), int(pt.y)),
-                                  rng.choice((2, 3)))
+                p.draw.circle(surf, self.ink, (int(pt.x), int(pt.y)), 3)
 
-        # Scattered ink patches/streaks around the board for a worn look.
-        margin = 160
-        for _ in range(14):
-            patch = rng.choice(patches + splats)
-            scale = rng.uniform(0.25, 0.7)
-            pw = max(6, int(patch.get_width() * scale))
-            ph = max(6, int(patch.get_height() * scale))
-            pimg = p.transform.smoothscale(patch, (pw, ph))
-            pimg = p.transform.rotate(pimg, rng.uniform(0, 360))
-            pimg.set_alpha(rng.randint(30, 90))    # faint, like stray ink
+        # A couple of solid BLACK ink blotches near the board -- it's ink, so
+        # they're near-opaque, not faint.
+        splat = tinted("thick_lines", self.SPLAT)
+        margin = 120
+        for _ in range(3):
+            d = rng.randint(20, 40)
+            s = p.transform.rotate(p.transform.smoothscale(splat, (d, d)),
+                                   rng.uniform(0, 360))
+            s.set_alpha(rng.randint(210, 255))
             px = rng.randint(int(o.x - margin), int(o.x + span + margin))
             py = rng.randint(int(o.y - margin), int(o.y + span + margin))
-            surf.blit(pimg, pimg.get_rect(center=(px, py)))
+            surf.blit(s, s.get_rect(center=(px, py)))
 
         return surf
 
