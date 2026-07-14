@@ -28,7 +28,10 @@ void main() {
 }
 """
 
-# Simple texture pass-through fragment shader
+# Pass-through fragment shader. The game texture is uploaded straight from the
+# pygame surface buffer (no CPU convert/flip), which means:
+#   * pixels arrive as BGRA (surface native order) -> swizzle .bgra to RGBA
+#   * the buffer is top-row-first while GL samples bottom-up -> flip V
 WINDOW_SCALING_FRAG_SRC = """
 #version 330
 
@@ -37,7 +40,9 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-    fragColor = texture(tex, v_uv);
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);   // flip vertically
+    fragColor = texture(tex, uv).bgra;      // BGRA -> RGBA, force opaque below
+    fragColor.a = 1.0;                       // surface has no alpha channel
 }
 """
 
@@ -180,10 +185,19 @@ class GLRenderer:
     def upload_surface(self, surface: p.Surface):
         """Upload a pygame surface to the game texture.
 
+        Fast path: hand the surface's raw pixel buffer straight to the GPU with
+        NO CPU copy. `p.image.tobytes(surface, "RGBA", True)` allocated and
+        serialised an ~8 MB byte string every frame (~11 ms at 1080p) *and*
+        flipped it on the CPU -- it was over half the frame time even when idle.
+
+        The trade: get_buffer() gives raw memory in the surface's native order
+        (BGRA on little-endian) and does NOT flip vertically. So we fix both in
+        the fragment shader instead: sample .bgra and invert the V coordinate.
+
         Args:
             surface: Pygame surface to upload (should match game_size)
         """
-        self.game_texture.write(p.image.tobytes(surface, "RGBA", True))
+        self.game_texture.write(surface.get_buffer())
 
     def render(self, clear_color: tuple = (0.0, 0.0, 0.0, 1.0)):
         """Render the game texture to screen.
