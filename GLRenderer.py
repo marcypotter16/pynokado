@@ -237,20 +237,23 @@ class GLRenderer:
         colors = array([[0, 0, 0]] * n, dtype="f4")
         intensities = array([0] * n, dtype="f4")
         corners = array([0] * n, dtype="f4")
+        falloffs = array([radius_px] * n, dtype="f4")
         for i, entry in enumerate(cards):
             rect, color, intensity = entry[0], entry[1], entry[2]
             corner = entry[3] if len(entry) > 3 else 0.0
+            falloff = entry[4] if len(entry) > 4 else radius_px
             rects[i] = rect
             colors[i] = color
             intensities[i] = intensity
             corners[i] = corner
+            falloffs[i] = falloff
 
         prog["u_res"].value = (float(self.game_w), float(self.game_h))
         prog["u_time"].value = float(time_s)
-        prog["u_radius"].value = float(radius_px)
         prog["u_count"].value = len(cards)
         prog["u_rects"].write(rects.tobytes())
         prog["u_colors"].write(colors.tobytes())
         prog["u_intensities"].write(intensities.tobytes())
         prog["u_corners"].write(corners.tobytes())
+        prog["u_falloffs"].write(falloffs.tobytes())
         self.glow_vao.render(moderngl.TRIANGLE_STRIP)

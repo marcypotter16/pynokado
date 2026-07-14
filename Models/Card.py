@@ -46,14 +46,20 @@ def make_stone(game: Game, card_model: "CardModel", diameter: int,
     ink = FACTION_INK.get(card_model.faction, DEFAULT_INK)
     surf = p.Surface((d, d), p.SRCALPHA)
 
-    # The brush ring's inner opening tells us how big the art disc should be so
-    # the art sits *inside* the ink, not under it.
+    # Crop the ring to its ink bounding box FIRST: the source PNGs aren't
+    # centred in their canvas, so scaling the raw canvas leaves the ring
+    # off-centre (and the art disc misaligned). After cropping, the ink fills
+    # the surface, so canvas-centre == ring-centre.
     ring_src = _load_ui(game, ring_file)
+    ring_src = ring_src.subsurface(ring_src.get_bounding_rect(min_alpha=1))
+
+    # The ring's inner opening (measured on the cropped ring) sets how big the
+    # art disc is, so the art sits *inside* the ink, not under it.
     hole = _inner_hole(ring_src)
     art_frac = min(hole.width, hole.height) / min(ring_src.get_size())
     art_d = max(4, int(d * art_frac))
 
-    # Circular art fill, centred.
+    # Circular art fill, centred on the stone.
     art = _cover_scale(p.image.load(card_model.art_path).convert_alpha(),
                        art_d, art_d)
     mask = p.Surface((art_d, art_d), p.SRCALPHA)
@@ -61,7 +67,7 @@ def make_stone(game: Game, card_model: "CardModel", diameter: int,
     art.blit(mask, (0, 0), special_flags=p.BLEND_RGBA_MULT)
     surf.blit(art, ((d - art_d) // 2, (d - art_d) // 2))
 
-    # Faction-tinted brush ring on top.
+    # Faction-tinted brush ring on top (now centred).
     ring = _tint_ink(p.transform.smoothscale(ring_src, (d, d)), ink)
     surf.blit(ring, (0, 0))
     return surf

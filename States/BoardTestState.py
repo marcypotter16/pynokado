@@ -195,10 +195,11 @@ class BoardTestState(State):
                 # Over the board: the card is shown as a round stone at the
                 # cursor, so glow a CIRCLE around the stone instead of the card
                 # rectangle (which otherwise lingers where the card was).
+                # corner = radius -> circle; tight falloff hugging the edge.
                 cx, cy = round(c.center.x), round(c.center.y)
                 d = self.STONE_D
                 rect = (cx - d // 2, cy - d // 2, d, d)
-                glows.append((rect, c.glow_color, c.lift, d / 2))  # corner=r -> circle
+                glows.append((rect, c.glow_color, c.lift, d / 2, d * 0.28))
             else:
                 g = c.glow_rect
                 glows.append(((g.x, g.y, g.w, g.h), c.glow_color, c.lift))
