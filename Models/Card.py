@@ -373,7 +373,7 @@ class Card:
         if allow_grab and self.game.clicked_sx == 1 and self.rect.collidepoint(cursor):
             self.dragging = True
             # Offset from cursor to card centre, so the grab point is preserved.
-            self.grab_offset = self.center - cursor
+            # self.grab_offset = self.center - cursor
 
         # Drop as soon as the button is released.
         if not self.game.actions["mouse_sx"]:

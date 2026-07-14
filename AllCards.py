@@ -52,7 +52,7 @@ ALL_CARDS = {
         strength=10,
         name="Siege Colossus",
         faction="tech",
-        icon_focus=(0.5, 0.42), icon_zoom=1.4,
+        icon_focus=(0.55, 0.42), icon_zoom=1.0,
     ),
     "the_threshold": CardModel(
         os.path.join(mj_dir, "the_threshold.png"),
@@ -60,5 +60,12 @@ ALL_CARDS = {
         name="The Threshold",
         faction="ancient",
         icon_focus=(0.5, 0.45), icon_zoom=1.3,
+    ),
+    "drake": CardModel(
+        os.path.join(mj_dir, "drake.png"),
+        strength=9,
+        name="The Drake",
+        faction="ancient",
+        icon_focus=(0.33, 0.48), icon_zoom=1.4,
     ),
 }
