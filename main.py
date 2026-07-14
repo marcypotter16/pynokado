@@ -1,6 +1,6 @@
 from Game import Game
-from States.CardShowcaseState import CardShowcaseState
+from States.BoardTestState import BoardTestState
 
 g: Game = Game()
-g.push_state(CardShowcaseState(g))
+g.push_state(BoardTestState(g))
 g.game_loop()

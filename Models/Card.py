@@ -36,6 +36,28 @@ def _tint_ink(img: p.Surface, color: tuple) -> p.Surface:
     return out
 
 
+def make_stone(card_model: "CardModel", diameter: int) -> p.Surface:
+    """Render a card as a round Go-style "stone": the card art cover-fit into a
+    circle, ringed in the faction ink colour. Used when a card is placed on the
+    board. Cached by the caller if needed."""
+    d = diameter
+    ink = FACTION_INK.get(card_model.faction, DEFAULT_INK)
+    surf = p.Surface((d, d), p.SRCALPHA)
+
+    # Circular art fill.
+    art = _cover_scale(p.image.load(card_model.art_path).convert_alpha(), d, d)
+    mask = p.Surface((d, d), p.SRCALPHA)
+    p.draw.circle(mask, (255, 255, 255, 255), (d // 2, d // 2), d // 2)
+    art.blit(mask, (0, 0), special_flags=p.BLEND_RGBA_MULT)
+    surf.blit(art, (0, 0))
+
+    # Ink ring (thick, faction-tinted) + a dark outer hairline for definition.
+    ring = tuple(min(255, c + 30) for c in ink)
+    p.draw.circle(surf, ring, (d // 2, d // 2), d // 2 - 1, width=max(2, d // 12))
+    p.draw.circle(surf, (10, 9, 8), (d // 2, d // 2), d // 2 - 1, width=1)
+    return surf
+
+
 # Brush frames (in the midjourney folder). The frame is chosen by card
 # strength: plain box for ordinary cards, the ornate flourish for the strongest.
 FRAME_BASIC = "frame_basic.png"      # ordinary cards
