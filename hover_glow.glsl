@@ -13,22 +13,29 @@ uniform int   u_count;                   // number of active glows
 uniform vec4  u_rects[MAX_CARDS];        // card rects: x, y, w, h (top-left origin)
 uniform vec3  u_colors[MAX_CARDS];       // per-card glow colour (0..1)
 uniform float u_intensities[MAX_CARDS];  // per-card strength (lift, 0..1)
+uniform float u_corners[MAX_CARDS];      // per-card corner radius (px). Set to
+                                         // >= min(w,h)/2 for a circular glow.
 uniform float u_time;                    // seconds, for the pulse
 uniform float u_radius;                  // glow falloff distance in pixels
 
 in vec2 v_uv;
 out vec4 fragColor;
 
-// Glow contribution of one card rect at pixel `px`, as premultiplied RGBA.
-vec4 card_glow(vec2 px, vec4 rect, vec3 color, float intensity) {
+// Glow contribution of one card shape at pixel `px`, as premultiplied RGBA.
+// `corner` rounds the rect; corner >= half the shorter side => a circle.
+vec4 card_glow(vec2 px, vec4 rect, vec3 color, float intensity, float corner) {
     vec2 c = rect.xy + rect.zw * 0.5;
     vec2 half_size = rect.zw * 0.5;
-    vec2 d = abs(px - c) - half_size;
-    float dist = length(max(d, 0.0));          // distance outside the rect
+    corner = min(corner, min(half_size.x, half_size.y));
+
+    // Signed distance to a rounded box (0 on the border, >0 outside).
+    vec2 q = abs(px - c) - (half_size - corner);
+    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - corner;
+    dist = max(dist, 0.0);                        // only the outside band
 
     float glow = 1.0 - smoothstep(0.0, u_radius, dist);
-    glow = pow(glow, 1.6);                       // tighten toward the edge
-    float outside = step(0.001, dist);           // don't wash out the card face
+    glow = pow(glow, 1.6);                        // tighten toward the edge
+    float outside = step(0.001, dist);            // don't wash out the shape
 
     float a = glow * intensity * outside;
     return vec4(color * a, a);
@@ -45,7 +52,8 @@ void main() {
     vec4 acc = vec4(0.0);
     for (int i = 0; i < MAX_CARDS; i++) {
         if (i >= u_count) break;
-        acc += card_glow(px, u_rects[i], u_colors[i], u_intensities[i]);
+        acc += card_glow(px, u_rects[i], u_colors[i], u_intensities[i],
+                         u_corners[i]);
     }
     acc *= pulse;
 

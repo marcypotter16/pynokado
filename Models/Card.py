@@ -36,25 +36,34 @@ def _tint_ink(img: p.Surface, color: tuple) -> p.Surface:
     return out
 
 
-def make_stone(card_model: "CardModel", diameter: int) -> p.Surface:
-    """Render a card as a round Go-style "stone": the card art cover-fit into a
-    circle, ringed in the faction ink colour. Used when a card is placed on the
-    board. Cached by the caller if needed."""
+def make_stone(game: Game, card_model: "CardModel", diameter: int,
+               ring_file: str = "ink_circle.png") -> p.Surface:
+    """Render a card as a round Go-style "stone": the card art fills a circle,
+    framed by the hand-inked brush ring (`ring_file`, tinted to the faction).
+    Used when a card is placed on the board. Pass a different `ring_file` for
+    stronger-card variants. Cached by the caller if needed."""
     d = diameter
     ink = FACTION_INK.get(card_model.faction, DEFAULT_INK)
     surf = p.Surface((d, d), p.SRCALPHA)
 
-    # Circular art fill.
-    art = _cover_scale(p.image.load(card_model.art_path).convert_alpha(), d, d)
-    mask = p.Surface((d, d), p.SRCALPHA)
-    p.draw.circle(mask, (255, 255, 255, 255), (d // 2, d // 2), d // 2)
-    art.blit(mask, (0, 0), special_flags=p.BLEND_RGBA_MULT)
-    surf.blit(art, (0, 0))
+    # The brush ring's inner opening tells us how big the art disc should be so
+    # the art sits *inside* the ink, not under it.
+    ring_src = _load_ui(game, ring_file)
+    hole = _inner_hole(ring_src)
+    art_frac = min(hole.width, hole.height) / min(ring_src.get_size())
+    art_d = max(4, int(d * art_frac))
 
-    # Ink ring (thick, faction-tinted) + a dark outer hairline for definition.
-    ring = tuple(min(255, c + 30) for c in ink)
-    p.draw.circle(surf, ring, (d // 2, d // 2), d // 2 - 1, width=max(2, d // 12))
-    p.draw.circle(surf, (10, 9, 8), (d // 2, d // 2), d // 2 - 1, width=1)
+    # Circular art fill, centred.
+    art = _cover_scale(p.image.load(card_model.art_path).convert_alpha(),
+                       art_d, art_d)
+    mask = p.Surface((art_d, art_d), p.SRCALPHA)
+    p.draw.circle(mask, (255, 255, 255, 255), (art_d // 2, art_d // 2), art_d // 2)
+    art.blit(mask, (0, 0), special_flags=p.BLEND_RGBA_MULT)
+    surf.blit(art, ((d - art_d) // 2, (d - art_d) // 2))
+
+    # Faction-tinted brush ring on top.
+    ring = _tint_ink(p.transform.smoothscale(ring_src, (d, d)), ink)
+    surf.blit(ring, (0, 0))
     return surf
 
 

@@ -218,11 +218,12 @@ class GLRenderer:
         time_s: float,
         radius_px: float = 70.0,
     ):
-        """Single additive glow pass for ALL lifted cards. `cards` is a list of
-        (rect_px, color, intensity) tuples -- rect in game pixels, top-left
-        origin. One draw call; each card's glow fades with its own intensity so
-        moving between cards cross-fades. No-op if the shader is missing or no
-        card is lit."""
+        """Single additive glow pass for ALL lit shapes. `cards` is a list of
+        (rect_px, color, intensity[, corner]) tuples -- rect in game pixels,
+        top-left origin; optional `corner` is the corner radius in px (>=
+        min(w,h)/2 makes the glow a circle, e.g. for placed stones). One draw
+        call; each shape's glow fades with its own intensity so moving between
+        them cross-fades. No-op if the shader is missing or nothing is lit."""
         if self.glow_vao is None or not cards:
             return
         cards = cards[: self.MAX_GLOW_CARDS]
@@ -235,10 +236,14 @@ class GLRenderer:
         rects = array([[0, 0, 0, 0]] * n, dtype="f4")
         colors = array([[0, 0, 0]] * n, dtype="f4")
         intensities = array([0] * n, dtype="f4")
-        for i, (rect, color, intensity) in enumerate(cards):
+        corners = array([0] * n, dtype="f4")
+        for i, entry in enumerate(cards):
+            rect, color, intensity = entry[0], entry[1], entry[2]
+            corner = entry[3] if len(entry) > 3 else 0.0
             rects[i] = rect
             colors[i] = color
             intensities[i] = intensity
+            corners[i] = corner
 
         prog["u_res"].value = (float(self.game_w), float(self.game_h))
         prog["u_time"].value = float(time_s)
@@ -247,4 +252,5 @@ class GLRenderer:
         prog["u_rects"].write(rects.tobytes())
         prog["u_colors"].write(colors.tobytes())
         prog["u_intensities"].write(intensities.tobytes())
+        prog["u_corners"].write(corners.tobytes())
         self.glow_vao.render(moderngl.TRIANGLE_STRIP)

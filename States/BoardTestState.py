@@ -58,7 +58,7 @@ class BoardTestState(State):
                         topleft=p.Vector2(hand_x0 + i * hand_gap - Card.WIDTH // 2,
                                           hand_y - Card.HEIGHT // 2))
             card.home = p.Vector2(card.center)   # where it returns to on invalid drop
-            card.stone = make_stone(model, self.STONE_D)  # cached round form
+            card.stone = make_stone(game, model, self.STONE_D)  # cached round form
             self.hand.append(card)
 
         # While dragging over the board, this holds (row, col, point) of the
@@ -92,8 +92,7 @@ class BoardTestState(State):
 
     def _place(self, card: Card, r: int, c: int, point: p.Vector2):
         """Turn a dragged hand card into a placed stone at (r, c)."""
-        stone_surf = make_stone(card.card_model, self.STONE_D)
-        self.stones[(r, c)] = {"surf": stone_surf, "pos": point,
+        self.stones[(r, c)] = {"surf": card.stone, "pos": point,
                                "model": card.card_model}
         self.hand.remove(card)
 
@@ -188,9 +187,19 @@ class BoardTestState(State):
 
     # -------------------------------------------------------- hover glow pass
     def _render_hover_glow(self):
-        glows = [
-            ((c.glow_rect.x, c.glow_rect.y, c.glow_rect.w, c.glow_rect.h),
-             c.glow_color, c.lift)
-            for c in self.hand if c.lift > 0.01
-        ]
+        glows = []
+        for c in self.hand:
+            if c.lift <= 0.01:
+                continue
+            if c is self.dragged and self.preview is not None:
+                # Over the board: the card is shown as a round stone at the
+                # cursor, so glow a CIRCLE around the stone instead of the card
+                # rectangle (which otherwise lingers where the card was).
+                cx, cy = round(c.center.x), round(c.center.y)
+                d = self.STONE_D
+                rect = (cx - d // 2, cy - d // 2, d, d)
+                glows.append((rect, c.glow_color, c.lift, d / 2))  # corner=r -> circle
+            else:
+                g = c.glow_rect
+                glows.append(((g.x, g.y, g.w, g.h), c.glow_color, c.lift))
         self.game.gl_renderer.render_glows(glows, time_s=self.game.elapsed)
