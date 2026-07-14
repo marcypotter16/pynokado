@@ -28,6 +28,26 @@ def _cover_scale(img: p.Surface, target_w: int, target_h: int) -> p.Surface:
     return scaled.subsurface(crop).copy()
 
 
+def _fit_art(img: p.Surface, target_w: int, target_h: int, zoom: float,
+             pad_color=(238, 234, 226)) -> p.Surface:
+    """Place `img` in a target rect at `zoom` relative to a cover-fit.
+      zoom == 1.0  -> exactly cover (fills, crops overflow) — the default.
+      zoom  < 1.0  -> smaller, so more of the image shows; any gap is filled
+                      with `pad_color` (blends with the ivory card base).
+      zoom  > 1.0  -> tighter crop.
+    Aspect ratio is always preserved."""
+    if abs(zoom - 1.0) < 1e-3:
+        return _cover_scale(img, target_w, target_h)
+    iw, ih = img.get_size()
+    scale = max(target_w / iw, target_h / ih) * zoom
+    sw, sh = round(iw * scale), round(ih * scale)
+    scaled = p.transform.smoothscale(img, (sw, sh))
+    out = p.Surface((target_w, target_h), p.SRCALPHA)
+    out.fill(pad_color)
+    out.blit(scaled, scaled.get_rect(center=(target_w // 2, target_h // 2)))
+    return out
+
+
 def _focal_crop(img: p.Surface, d: int, focus: tuple, zoom: float) -> p.Surface:
     """Cover-scale `img` to a d×d square, but zoomed by `zoom` and centred on the
     `focus` point (fx, fy in 0..1 of the source). Used to frame a card's face /
@@ -180,6 +200,7 @@ class CardModel:
         faction: str = "",
         icon_focus: tuple[float, float] = (0.5, 0.5),
         icon_zoom: float = 1.0,
+        art_zoom: float = 1.0,
     ):
         self.art_path = art_path
         self.strength = strength
@@ -190,6 +211,10 @@ class CardModel:
         # e.g. (0.5, 0.3)/1.9 zooms to a face in the upper-middle.
         self.icon_focus = icon_focus
         self.icon_zoom = icon_zoom
+        # Card-face art zoom relative to cover-fit. <1.0 shows more of the art
+        # (zoomed out; any gap fills with the card base) for arts whose edges
+        # get clipped by the 2:3 window.
+        self.art_zoom = art_zoom
 
 
 class CardModelNotFoundError(SyntaxError):
@@ -331,10 +356,11 @@ class Card:
         # Ivory paper base (card body).
         p.draw.rect(surf, (238, 234, 226), (ox, oy, w, h), border_radius=6)
 
-        # Art window: cover-fit, inset, leaving room for the name.
+        # Art window: fit (cover by default; art_zoom<1 shows more), inset,
+        # leaving room for the name.
         aw = w - 2 * m
         ah = h - 2 * m - self.TITLE_H
-        art = _cover_scale(self.raw_art, aw, ah)
+        art = _fit_art(self.raw_art, aw, ah, self.card_model.art_zoom)
         surf.blit(art, (ox + m, oy + m))
 
         # Brush frame, tinted, scaled so its opening frames the card.
