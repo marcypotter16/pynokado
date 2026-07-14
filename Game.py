@@ -46,6 +46,10 @@ class Game:
         )
         self.GAME_CENTER = (self.GAME_W / 2, self.GAME_H / 2)
         self.game_canvas = p.Surface((self.GAME_W, self.GAME_H))
+        # Foreground canvas: drawn OVER the glow pass (e.g. a lifted/dragged
+        # card), so the glow sits behind it. Transparent; states blit onto it
+        # via render_foreground() and it's composited last.
+        self.fg_canvas = p.Surface((self.GAME_W, self.GAME_H), p.SRCALPHA)
 
         self.screen = p.display.set_mode(
             (self.settings.SCREEN_W, self.settings.SCREEN_H),
@@ -212,7 +216,8 @@ class Game:
         self.timer_manager.update()
 
     def render(self):
-        self.state_stack.top().render(self.game_canvas)
+        state = self.state_stack.top()
+        state.render(self.game_canvas)
         if self.show_stats:
             self.print_stats(self.game_canvas)
         # Render cursor above everything on game canvas
@@ -220,13 +225,21 @@ class Game:
             p.draw.circle(self.game_canvas, p.Color("white"), self.cursorpos, 5)
             p.draw.circle(self.game_canvas, p.Color("black"), self.cursorpos, 8, 2)
 
-        # Upload game canvas to GPU and render
+        # --- background layer: everything under the glow ---
         self.gl_renderer.upload_surface(self.game_canvas)
         self.gl_renderer.render()
 
-        # GPU post-processing effects (buff sheen, etc.)
+        # --- glow pass: sits between background and foreground ---
         for callback in self.post_render_callbacks:
             callback()
+
+        # --- foreground layer: things drawn OVER the glow (lifted card). The
+        # state fills fg_canvas (transparent) in render_foreground(); we clear,
+        # let it draw, then composite on top without clearing the screen. ---
+        self.fg_canvas.fill((0, 0, 0, 0))
+        if hasattr(state, "render_foreground"):
+            state.render_foreground(self.fg_canvas)
+            self.gl_renderer.draw_overlay(self.fg_canvas)
 
         p.display.flip()
 

@@ -153,19 +153,28 @@ class BoardTestState(State):
             ghost.set_alpha(120)
             surface.blit(ghost, ghost.get_rect(center=point))
 
-        # Hand cards. The dragged card, while over a valid point, is drawn as
-        # its round stone at the cursor (so it "becomes" what it will place);
-        # otherwise the full card. Dragged card is last -> on top.
+        # Non-dragged hand cards. The dragged one is drawn LATER in
+        # render_foreground(), so it sits above its own glow pass.
         for card in self.hand:
-            if card is self.dragged and self.preview is not None:
-                center = (round(card.center.x), round(card.center.y))
-                surface.blit(card.stone, card.stone.get_rect(center=center))
-            else:
+            if card is not self.dragged:
                 card.render(surface)
 
         hud = "Drag a card onto an intersection to place it."
         hud_rect = p.Rect(0, self.game.GAME_H - 44, self.game.GAME_W, 32)
         draw_centered_text(self.hud_font, surface, hud, self.ink, hud_rect)
+
+    def render_foreground(self, surface):
+        """Drawn OVER the glow pass. The dragged card/stone lives here so the
+        glow sits behind it instead of covering it."""
+        card = self.dragged
+        if card is None:
+            return
+        if self.preview is not None:
+            # Over a valid point: show it as the round stone it will place.
+            center = (round(card.center.x), round(card.center.y))
+            surface.blit(card.stone, card.stone.get_rect(center=center))
+        else:
+            card.render(surface)
 
     def _draw_board(self, surface):
         span = (self.GRID - 1) * self.CELL

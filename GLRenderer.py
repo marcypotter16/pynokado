@@ -36,13 +36,15 @@ WINDOW_SCALING_FRAG_SRC = """
 #version 330
 
 uniform sampler2D tex;
+uniform bool u_force_opaque;   // true for the opaque game canvas (no alpha
+                               // channel); false for the transparent overlay.
 in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
     vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);   // flip vertically
-    fragColor = texture(tex, uv).bgra;      // BGRA -> RGBA, force opaque below
-    fragColor.a = 1.0;                       // surface has no alpha channel
+    fragColor = texture(tex, uv).bgra;      // BGRA -> RGBA
+    if (u_force_opaque) fragColor.a = 1.0;  // canvas has no real alpha channel
 }
 """
 
@@ -64,8 +66,10 @@ class GLRenderer:
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
-        # Create the game texture
+        # Create the game texture, plus a foreground texture composited over
+        # the glow pass (for a lifted card that must sit above its own glow).
         self.game_texture = self._create_texture(game_size)
+        self.fg_texture = self._create_texture(game_size)
 
         # Load shader programs
         self.programs = {
@@ -207,7 +211,20 @@ class GLRenderer:
         """
         self.ctx.viewport = self.viewport
         self.ctx.clear(*clear_color)
+        self.programs["window_scaling"]["u_force_opaque"].value = True
         self.game_texture.use(0)
+        self.quad_vao.render(moderngl.TRIANGLE_STRIP)
+
+    def draw_overlay(self, surface: p.Surface):
+        """Composite a transparent foreground surface ON TOP of whatever is
+        already on screen (no clear), using the same scaling shader. Used to
+        draw a lifted card above its glow pass. Same fast buffer upload +
+        shader flip/swizzle as the main canvas, but alpha is preserved so the
+        transparent areas don't paint over the screen."""
+        self.ctx.viewport = self.viewport
+        self.programs["window_scaling"]["u_force_opaque"].value = False
+        self.fg_texture.write(surface.get_buffer())
+        self.fg_texture.use(0)
         self.quad_vao.render(moderngl.TRIANGLE_STRIP)
 
     MAX_GLOW_CARDS = 12  # must match MAX_CARDS in hover_glow.glsl
