@@ -58,7 +58,14 @@ class BoardTestState(State):
                         topleft=p.Vector2(hand_x0 + i * hand_gap - Card.WIDTH // 2,
                                           hand_y - Card.HEIGHT // 2))
             card.home = p.Vector2(card.center)   # where it returns to on invalid drop
+            card.stone = make_stone(model, self.STONE_D)  # cached round form
             self.hand.append(card)
+
+        # While dragging over the board, this holds (row, col, point) of the
+        # intersection the card would snap to -- or None. `dragged` is the card
+        # currently being dragged (or None).
+        self.preview = None
+        self.dragged = None
 
         self.hud_font = game.fonts["comfortaa"]["small"]
         self.title_font = game.fonts["sigokae"]["big"]
@@ -111,6 +118,12 @@ class BoardTestState(State):
                 self.hand.append(card)
                 break
 
+        # Placement preview: nearest free intersection to the dragged card.
+        self.preview = None
+        self.dragged = next((c for c in self.hand if c.dragging), None)
+        if self.dragged is not None:
+            self.preview = self._nearest_free_point(p.Vector2(self.dragged.center))
+
         # Resolve drops: a card that WAS dragging but no longer is.
         for card in was_dragging:
             if not card.dragging:
@@ -134,9 +147,22 @@ class BoardTestState(State):
             rect = stone["surf"].get_rect(center=stone["pos"])
             surface.blit(stone["surf"], rect)
 
-        # Hand cards (dragged one is last -> drawn on top).
+        # Ghost preview stone on the target intersection.
+        if self.dragged is not None and self.preview is not None:
+            _, _, point = self.preview
+            ghost = self.dragged.stone.copy()
+            ghost.set_alpha(120)
+            surface.blit(ghost, ghost.get_rect(center=point))
+
+        # Hand cards. The dragged card, while over a valid point, is drawn as
+        # its round stone at the cursor (so it "becomes" what it will place);
+        # otherwise the full card. Dragged card is last -> on top.
         for card in self.hand:
-            card.render(surface)
+            if card is self.dragged and self.preview is not None:
+                center = (round(card.center.x), round(card.center.y))
+                surface.blit(card.stone, card.stone.get_rect(center=center))
+            else:
+                card.render(surface)
 
         hud = "Drag a card onto an intersection to place it."
         hud_rect = p.Rect(0, self.game.GAME_H - 44, self.game.GAME_W, 32)
