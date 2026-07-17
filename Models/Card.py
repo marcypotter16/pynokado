@@ -3,7 +3,12 @@ import os
 import pygame as p
 
 from Game import Game
+from Utils.Image import soften_alpha
 from Utils.Text import draw_centered_text
+
+# Feather the aliased alpha edge of the white-keyed brush sprites at load time
+# (once, cached). Set False to compare against the raw keyed edges.
+SOFTEN_STROKES = True
 
 
 # Per-faction accent used to tint the ink brush strokes (frame + enso).
@@ -135,8 +140,31 @@ _IMG_CACHE: dict[str, p.Surface] = {}
 def _load_ui(game: Game, name: str) -> p.Surface:
     if name not in _IMG_CACHE:
         path = os.path.join(game.assets_dir, "sprites", "ui", name)
-        _IMG_CACHE[name] = p.image.load(path).convert_alpha()
+        img = p.image.load(path).convert_alpha()
+        if SOFTEN_STROKES:
+            img = soften_alpha(img)
+        _IMG_CACHE[name] = img
     return _IMG_CACHE[name]
+
+
+# Hand-inked vertical brush strokes used to build the "lines" frame style.
+# These are tall thin ink strokes (~30x510); trimmed to their ink bbox so the
+# transparent margins don't throw off placement.
+_BOARD_LINE_COUNT = 6
+
+
+def _load_board_line(game: Game, idx: int) -> p.Surface:
+    """Return board_line_<idx>, trimmed to its ink bounding box (cached)."""
+    key = f"__board_line__{idx}"
+    if key not in _IMG_CACHE:
+        path = os.path.join(game.assets_dir, "sprites", "ui", "board_lines",
+                            f"board_line_{idx}.png")
+        raw = p.image.load(path).convert_alpha()
+        cropped = raw.subsurface(raw.get_bounding_rect(min_alpha=1)).copy()
+        if SOFTEN_STROKES:
+            cropped = soften_alpha(cropped)
+        _IMG_CACHE[key] = cropped
+    return _IMG_CACHE[key]
 
 
 def _inner_hole(img: p.Surface, alpha_th: int = 40) -> p.Rect:
@@ -187,6 +215,8 @@ def _load_frame(game: Game, filename: str) -> tuple[p.Surface, p.Rect]:
     if key not in _IMG_CACHE:
         path = os.path.join(game.assets_dir, "sprites", "midjourney-session", filename)
         raw = p.image.load(path).convert_alpha()
+        if SOFTEN_STROKES:
+            raw = soften_alpha(raw)
         _IMG_CACHE[key] = (raw, _inner_hole(raw))
     return _IMG_CACHE[key]
 
@@ -249,6 +279,7 @@ class Card:
                  topleft: p.Vector2 = p.Vector2(0, 0),
                  font_family: str = "korean_calligraphy",
                  frame_file: str = None,
+                 frame_style: str = "sprite",
                  ) -> None:
         self.game = game
         self.topleft = p.Vector2(topleft)
@@ -256,6 +287,9 @@ class Card:
             raise CardModelNotFoundError
         self.card_model = card_model
         self.font_family = font_family
+        # "sprite" = premade brush-frame asset; "lines" = frame assembled from
+        # individual vertical ink strokes (board_line_*).
+        self.frame_style = frame_style
         # Frame chosen by strength unless one is explicitly passed in.
         self.frame_file = frame_file or frame_for_strength(card_model.strength)
 
@@ -303,11 +337,25 @@ class Card:
             self.surface = self._build_face()
             self._build_hover_surfaces()
 
+    def set_frame_style(self, style: str):
+        """Swap the frame style ("sprite"/"lines") and rebuild the face."""
+        if style != self.frame_style:
+            self.frame_style = style
+            self.surface = self._build_face()
+            self._build_hover_surfaces()
+
     def _font(self, size: str) -> p.font.Font:
         return self.game.fonts[self.font_family][size]
 
+    # How far the vertical-line frame's strokes overhang each card edge, and
+    # how thick they are drawn. Only used by the "lines" frame style.
+    LINE_OVERHANG = 10   # stroke overhang past the card edge (padding per side)
+    LINE_THICK = 22      # drawn thickness (short axis) of each edge stroke
+
     # ------------------------------------------------------------------ build
     def _build_face(self) -> p.Surface:
+        if self.frame_style == "lines":
+            return self._build_face_lines()
         w, h, m = self.WIDTH, self.HEIGHT, self.MARGIN
 
         # --- work out how the frame must be scaled/placed relative to the card.
@@ -378,6 +426,78 @@ class Card:
         self._draw_power_enso(surf, ox + m + self.GEM_R, oy + m + self.GEM_R)
 
         return surf
+
+    # ------------------------------------------------------ lines frame variant
+    def _build_face_lines(self) -> p.Surface:
+        """Alternate card face whose border is built from four hand-inked
+        vertical strokes (board_line_*) instead of a premade frame sprite.
+        Verticals are used as-is on the left/right edges and rotated 90° for
+        the top/bottom. Padding is a fixed overhang, so the layout math is much
+        simpler than the sprite path."""
+        w, h, m = self.WIDTH, self.HEIGHT, self.MARGIN
+        pad = self.LINE_OVERHANG
+
+        pad_l = pad_t = pad_r = pad_b = pad + 1
+        self.pad = (pad_l, pad_t)
+        surf = p.Surface((w + pad_l + pad_r, h + pad_t + pad_b), p.SRCALPHA)
+        ox, oy = pad_l, pad_t  # card body origin within the padded surface
+
+        self.frame_rect = p.Rect(0, 0, surf.get_width(), surf.get_height())
+        self.frame_rect.topleft = (self.rect.x - pad_l, self.rect.y - pad_t)
+
+        # Ivory paper base (card body).
+        p.draw.rect(surf, (238, 234, 226), (ox, oy, w, h), border_radius=6)
+
+        # Art window (same fit as the sprite path).
+        aw = w - 2 * m
+        ah = h - 2 * m - self.TITLE_H
+        art = _fit_art(self.raw_art, aw, ah, self.card_model.art_zoom)
+        surf.blit(art, (ox + m, oy + m))
+
+        # Ink-stroke border, straddling the card edge.
+        self._draw_line_frame(surf, ox, oy, w, h)
+
+        # Card name, ink-coloured, on the paper strip below the art.
+        if self.card_model.name:
+            name_rect = p.Rect(ox + m, oy + h - m - self.TITLE_H, aw, self.TITLE_H)
+            draw_centered_text(self._font("small"), surf, self.card_model.name,
+                               tuple(min(255, c + 6) for c in self.ink), name_rect)
+
+        # Power enso (ink circle) with the strength number, top-left of the card.
+        self._draw_power_enso(surf, ox + m + self.GEM_R, oy + m + self.GEM_R)
+        return surf
+
+    def _draw_line_frame(self, surf, ox, oy, w, h):
+        """Draw four ink strokes around the card body (origin ox,oy, size w×h),
+        each tinted to the faction ink. Strokes overhang the corners and use
+        different source sprites per side so no two edges look identical."""
+        pad = self.LINE_OVERHANG
+        t = self.LINE_THICK
+
+        def stroke(idx: int, length: int, vertical: bool) -> p.Surface:
+            """A tinted board_line stretched to `length` along its long axis and
+            `t` along its short axis. `vertical` keeps its native orientation;
+            otherwise it's rotated 90° into a horizontal stroke."""
+            src = _load_board_line(self.game, idx % _BOARD_LINE_COUNT)
+            s = p.transform.smoothscale(src, (t, length))
+            if not vertical:
+                s = p.transform.rotate(s, 90)
+            return _tint_ink(s, self.ink)
+
+        span_v = h + 2 * pad   # left/right strokes run the full padded height
+        span_h = w + 2 * pad   # top/bottom strokes run the full padded width
+
+        # Left / right (native vertical strokes), centred on the card edge.
+        left = stroke(0, span_v, vertical=True)
+        right = stroke(3, span_v, vertical=True)
+        surf.blit(left, (ox - t // 2, oy - pad))
+        surf.blit(right, (ox + w - t // 2, oy - pad))
+
+        # Top / bottom (rotated to horizontal), centred on the card edge.
+        top = stroke(1, span_h, vertical=False)
+        bottom = stroke(4, span_h, vertical=False)
+        surf.blit(top, (ox - pad, oy - t // 2))
+        surf.blit(bottom, (ox - pad, oy + h - t // 2))
 
     def _draw_power_enso(self, surf, cx, cy):
         d = self.GEM_R * 2

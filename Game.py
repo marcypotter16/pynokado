@@ -103,6 +103,9 @@ class Game:
         self.render_stack = {"background": [], "foreground": [], "above_all": []}
 
         self.cursorpos = None
+        # Set True by a state/board each frame it wants to draw its own cursor,
+        # suppressing the default circle cursor. Reset to False after each render.
+        self.custom_cursor = False
         self.base_dir = workdir
         self.load_assets()
         self.load_map()
@@ -220,10 +223,13 @@ class Game:
         state.render(self.game_canvas)
         if self.show_stats:
             self.print_stats(self.game_canvas)
-        # Render cursor above everything on game canvas
-        if not self.settings.MOUSE_VISIBLE and self.cursorpos:
+        # Render the default circle cursor above everything -- unless a state/board
+        # requested a custom cursor this frame (it draws its own instead).
+        if not self.settings.MOUSE_VISIBLE and self.cursorpos and not self.custom_cursor:
             p.draw.circle(self.game_canvas, p.Color("white"), self.cursorpos, 5)
             p.draw.circle(self.game_canvas, p.Color("black"), self.cursorpos, 8, 2)
+        # Reset for next frame: states must re-assert a custom cursor each frame.
+        self.custom_cursor = False
 
         # --- background layer: everything under the glow ---
         self.gl_renderer.upload_surface(self.game_canvas)

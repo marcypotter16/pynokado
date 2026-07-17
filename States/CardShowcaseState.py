@@ -44,6 +44,7 @@ class CardShowcaseState(State):
         super().__init__(game, msg, layer, bg_color=(235, 232, 224))
 
         self.font_index = 0
+        self.frame_style = "sprite"   # toggled with G ("sprite" <-> "lines")
 
         # GPU hover-glow pass (drawn after the main canvas is on screen).
         game.post_render_callbacks.append(self._render_hover_glow)
@@ -97,6 +98,11 @@ class CardShowcaseState(State):
         for card in self.cards:
             card.set_font_family(family)
 
+    def _toggle_frame_style(self):
+        self.frame_style = "lines" if self.frame_style == "sprite" else "sprite"
+        for card in self.cards:
+            card.set_frame_style(self.frame_style)
+
     def _handle_font_keys(self):
         for event in self.game.events:
             if event.type == p.KEYDOWN:
@@ -104,6 +110,8 @@ class CardShowcaseState(State):
                     self._set_font(self.font_index + 1)   # F: next font
                 elif event.key == p.K_b:
                     self._set_font(self.font_index - 1)   # B: previous font
+                elif event.key == p.K_g:
+                    self._toggle_frame_style()            # G: toggle frame style
 
     def update(self, delta_time):
         super().update(delta_time)

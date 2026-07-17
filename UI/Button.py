@@ -37,7 +37,7 @@ class TextButton(UIElement):
         self.font: pygame.font.Font = (
             self.game.fonts["comfortaa"]["medium"] if font is None else font
         )
-        self.hover_color = hover_color
+        self.hover_color = hover_color if type(hover_color) == tuple else (0,0,0,0)
         self.height = self.font.get_height() + 10
         self.command = None
         if callable(command):
@@ -101,7 +101,7 @@ class ImageButton(TextButton):
         font: pygame.font.Font | None = None,
         corner_radius=10,
         command=lambda: print("Clicked"),
-        hover_color=(150, 150, 150),
+        hover_color: tuple | str = "transparent",
         hover_animation: list[pygame.Surface] = None,
         mouse_pressed_image: pygame.Surface = None,
         animation_fps: int = 60,

@@ -1,14 +1,16 @@
+from abc import ABC
+
 import pygame
 
 from Game import Game
-from Collections.Stack import Stack
+from Collections.PrioQueue import PrioQueue
+from GameObject import GameObject
 from UI.Abstract import UICanvas
 from UI.Label import Label
-from Utils.Text import draw_centered_text
 from Utils.Colors import BLACK
 
 
-class State:
+class State(ABC):
     def __init__(
         self,
         game: Game,
@@ -29,16 +31,29 @@ class State:
             fg_color=(255, 255, 255),
         )
         self.bg_color = bg_color
-        self.render_stack = Stack()
         # self.prev_state = None
         self.data = data
         self.layer = layer
         self.keep_previous_state_updating = previous_state is not None
         if previous_state is not None:
             self.prev_state = previous_state
-        
+        self.render_queue: PrioQueue = PrioQueue()
+
+    def add_to_render_queue(self, obj: GameObject, z_index: int = 0):
+        self.render_queue.add_object(obj, z_index)
+
+    def remove_from_render_queue(self, obj: GameObject):
+        if not self.render_queue.remove_object(obj):
+            print(f"Warning: object {obj} not found in render queue")
+
+    def change_z_index(self, obj: GameObject, new_z_index: int):
+        if not self.render_queue.change_z(obj, new_z_index):
+            print(f"Warning: object {obj} not found in render queue")
+
     def render(self, surface: pygame.Surface):
         surface.fill(self.bg_color)
+        for _, obj in self.render_queue:
+            obj.render(surface)
         self.canvas.render(surface)
 
     def update(self, delta_time):
