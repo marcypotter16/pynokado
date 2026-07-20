@@ -224,57 +224,7 @@ scoring, terrain reveal animation.
 
 ## Track 0 — Per-state render stack (infrastructure; do early)
 
-**Why:** renders are scattered across classes (`Board`, `Card`, stones, cursor, glow) and
-"who draws last" is implicit in call order across files — fragile and hard to reason about
-(the mouse-cursor-on-top-of-brush bug was exactly this). Centralize *ordering* so each object
-declares a z-priority and Game/State draws everything in one sorted pass.
-
-**Mental model (user's):** states are Godot-like *scenes*, not game objects. So the render
-stack lives **on `State`**, each state owns its own subscribers, and teardown is automatic
-when the state is popped. **Retained mode** (objects subscribe once and persist) — consistent
-with the existing retained-mode UI (`UICanvas`), NOT immediate mode.
-
-**Current state of the code (finish, don't duplicate):**
-- `Game.render_stack = {"background","foreground","above_all"}` (Game.py:103) exists but
-  `Game.render()` (Game.py:221) **never iterates it** — it calls `state_stack.top().render()`
-  directly. Dead scaffold.
-- `State` appends `self.render` into `game.render_stack[layer]` on `enter_state` — also unused.
-- `State.render_stack = Stack()` (State.py:32) is a second, unused field. `Stack` is LIFO with
-  front-insert `push` — **wrong structure** for z-ordered drawing.
-
-**Design:**
-- A small `RenderStack` (new, e.g. `Collections/RenderStack.py` or inline in `State`): holds
-  `(z, obj)` entries; `subscribe(obj, z=0)`, `unsubscribe(obj)`, and `render(surface)` that
-  draws every subscriber in ascending z (stable for equal z = insertion order). `obj` is
-  anything with `render(surface)`.
-- Replace `State.render_stack = Stack()` with this `RenderStack`. `State.render(surface)` fills
-  bg, then delegates to `self.render_stack.render(surface)` (canvas subscribes too, at a low z).
-- Objects subscribe to **their state's** stack: e.g. `state.render_stack.subscribe(self.board,
-  z=10)`, cards at a higher z, cursor/overlays highest. `Board`/`Card`/etc. lose their ad-hoc
-  render call sites; they just expose `render(surface)` and subscribe once in the state's
-  `__init__`.
-- **Teardown:** because the stack is owned by the state, popping the state drops it — no leak
-  (contrast the never-removed `post_render_callbacks`, which this pattern should eventually
-  replace for glow passes too).
-- **Remove the dead `Game.render_stack` dict** and the `State` registrations into it, OR
-  repurpose Game's three buckets as coarse z-bands — recommend deleting to avoid two systems.
-
-**Interaction with the GL pipeline:** the per-state stack composes the CPU `game_canvas`
-(what today's `state.render()` produces). The GL passes (background upload, glow callbacks,
-fg overlay) are unchanged — the render stack only reorganizes *how the canvas is assembled*,
-not the GL flip. The `custom_cursor` flag added for the brush cursor can later become just a
-high-z cursor subscriber.
-
-**Files:** `States/State.py` (swap `Stack`→`RenderStack`, delegate in `render`), new
-`Collections/RenderStack.py`, `Models/Board.py` + `Models/Card.py` (subscribe instead of being
-called directly), `Game.py` (delete dead `render_stack` dict). Migrate one state first
-(`BoardTestState`) as the reference, then the rest.
-
-**Verify:** run the board; confirm draw order is correct (board < stones < cards < cursor),
-the brush cursor sits above everything, and popping a state leaves no dangling renders.
-
-**Defer:** converting the glow `post_render_callbacks` to the stack; z-bands/named layers on
-top of raw z (add only if raw z gets unwieldy).
+Render queue is done. Child objects subscribe to parent render queue with z_index. When not needed the index is defaulted to 0 and it basically becomes the old rendering.
 
 ---
 

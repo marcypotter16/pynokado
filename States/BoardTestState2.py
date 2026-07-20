@@ -23,6 +23,18 @@ class BoardTestState(State):
     STONE_D = 76             # placed-stone diameter
     SNAP_DIST = 52           # how close to a point a drop must be to place
 
+    # Brush rings to frame a placed stone, cycled with [R] to compare them.
+    # make_stone measures each ring's inner hole to size the art disc, so a
+    # thicker ring gives a smaller face -- that's why they don't all match.
+    # Keep these small: make_stone's cost scales with the SOURCE pixels, not the
+    # 76px stone, so a multi-megapixel ring stalls the game ~0.7s per card.
+    RINGS = [
+        ("bold", "scaled_down_bold_enso.png"),
+        ("classic", "ink_circle.png"),
+        ("speckled", "9332630d3fdf256d6a4b97a8eb9dccc9.png"),
+        ("rough", "c735a5e3a9726cef03b2944ad108b27e.png"),
+    ]
+
     def __init__(self, game, msg=None, layer="foreground"):
         super().__init__(game, msg, layer, bg_color=(235, 232, 224))
 
@@ -50,6 +62,7 @@ class BoardTestState(State):
         self.stones: dict[tuple[int, int], dict] = {}
 
         # --- deal a hand along the bottom ---
+        self._ring_index = 0
         models = list(ALL_CARDS.values())
         self.hand: list[Card] = []
         hand_gap = 220
@@ -61,7 +74,7 @@ class BoardTestState(State):
                         topleft=p.Vector2(hand_x0 + i * hand_gap - Card.WIDTH // 2,
                                           hand_y - Card.HEIGHT // 2))
             card.home = p.Vector2(card.center)   # where it returns to on invalid drop
-            card.stone = make_stone(game, model, self.STONE_D)  # cached round form
+            card.stone = make_stone(game, model, self.STONE_D, self.ring_file)  # cached round form
             self.hand.append(card)
 
         # While dragging over the board, this holds (row, col, point) of the
@@ -109,6 +122,27 @@ class BoardTestState(State):
         out.blit(vig, (0, 0), special_flags=p.BLEND_MULT)
         return out
 
+    # ------------------------------------------------------------------ rings
+    @property
+    def ring_file(self) -> str:
+        return self.RINGS[self._ring_index][1]
+
+    @property
+    def ring_name(self) -> str:
+        return self.RINGS[self._ring_index][0]
+
+    def _cycle_ring(self):
+        """Next brush ring, re-cutting every stone. Stones are baked surfaces,
+        so both the hand's cached form and the already-placed ones have to be
+        remade -- otherwise the board keeps showing the previous ring."""
+        self._ring_index = (self._ring_index + 1) % len(self.RINGS)
+        for card in self.hand:
+            card.stone = make_stone(self.game, card.card_model, self.STONE_D,
+                                    self.ring_file)
+        for stone in self.stones.values():
+            stone["surf"] = make_stone(self.game, stone["model"], self.STONE_D,
+                                       self.ring_file)
+
     # ------------------------------------------------------------- placement
     def _nearest_free_point(self, pos: p.Vector2):
         """Return (row, col, point) of the closest empty intersection within
@@ -142,6 +176,8 @@ class BoardTestState(State):
                     for card in self.hand:
                         new_frame_style = "lines" if card.frame_style == "sprite" else "sprite"
                         card.set_frame_style(new_frame_style)
+                if event.key == p.K_r:
+                    self._cycle_ring()
 
         # Track which card (if any) was dragging before this update, so we can
         # detect the release and resolve the drop.
@@ -202,7 +238,9 @@ class BoardTestState(State):
             if card is not self.dragged:
                 card.render(surface)
 
-        hud = "Drag a card onto an intersection to place it."
+        hud = (f"Drag a card onto an intersection to place it.    "
+               f"[R] ring: {self.ring_name} "
+               f"({self._ring_index + 1}/{len(self.RINGS)})")
         hud_rect = p.Rect(0, self.game.GAME_H - 44, self.game.GAME_W, 32)
         draw_centered_text(self.hud_font, surface, hud, self.ink, hud_rect)
 

@@ -9,6 +9,11 @@ class GameSettings:
     FPS: int = 120
     LETTERBOX_COLOR: tuple = (50, 50, 50)
     MOUSE_VISIBLE: bool = False
+    # Fullscreen at the monitor's native resolution. This implies DPI awareness
+    # (otherwise Windows hands us a downscaled virtual resolution and the OS
+    # upscales it -> soft). Windowed dev stays DPI-unaware so window sizes don't
+    # swing when moving between different-DPI screens.
+    FULLSCREEN: bool = True
 
     @classmethod
     def from_json(cls, json_str: str):

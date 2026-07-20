@@ -144,3 +144,39 @@ if __name__ == "__main__":
     print("wrote:", os.path.abspath(out_dir))
     print("  soften_compare.png  (left = original, right = softened; NEAREST zoom)")
     pygame.quit()
+
+def brightness(pixel: tuple):
+    R, G, B = pixel
+    return (0.2126*R + 0.7152*G + 0.0722*B)
+
+def remove_bg(surf: pygame.Surface, threshold: float = 220.0) -> pygame.Surface:
+    """Key out a bright/white background: pixels brighter than `threshold`
+    (luma 0..255) become fully transparent, keeping the darker ink/subject.
+    Returns a new SRCALPHA surface; the input is left untouched.
+
+    Vectorised (no per-pixel Python loop). `threshold` is on the 0..255 luma
+    scale from `brightness`, so 220 keeps everything but near-white."""
+    out = surf.convert_alpha()
+    rgb = pygame.surfarray.array3d(out).astype(float32)   # (w, h, 3)
+    # per-pixel luma via the same weights as brightness()
+    luma = 0.2126 * rgb[:, :, 0] + 0.7152 * rgb[:, :, 1] + 0.0722 * rgb[:, :, 2]
+    alpha = pygame.surfarray.pixels_alpha(out)            # live view, edit in place
+    alpha[luma > threshold] = 0
+    del alpha                                             # release the pixel lock
+    return out
+
+from scipy.ndimage import binary_fill_holes, binary_dilation
+
+def knockout(surf):
+    """black ink + transparent bg -> black ink on opaque white body."""
+    alpha = pygame.surfarray.array_alpha(surf) > 128      # or: ink mask from color
+    body = binary_fill_holes(alpha)                        # closes the mountain interior
+    body = binary_dilation(body, iterations=2)             # slight halo beyond the outline
+    out = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
+    arr = pygame.surfarray.pixels3d(out)
+    a = pygame.surfarray.pixels_alpha(out)
+    arr[body] = (255, 255, 255)
+    a[body] = 255
+    del arr, a
+    out.blit(surf, (0, 0))                                 # ink on top
+    return out

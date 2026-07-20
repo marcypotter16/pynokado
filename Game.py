@@ -9,7 +9,20 @@ from Settings import GameSettings
 # from SocketManager import SocketManager
 from Utils.Timer import SpacedCallback, Timer, TimerManager
 
-set_dpi_awareness()
+# DPI awareness MUST be set before pygame is imported, but whether we want it
+# depends on the FULLSCREEN setting (fullscreen renders at native res -> needs
+# awareness; windowed dev stays unaware so window sizes don't swing across
+# screens). So peek at settings.json here, before importing pygame. Windowed is
+# the safe default if the file is missing/unreadable.
+def _wants_fullscreen() -> bool:
+    try:
+        with open(os.path.join(os.getcwd(), "settings.json")) as f:
+            return bool(GameSettings.from_json(f.read()).FULLSCREEN)
+    except Exception:
+        return False
+
+if _wants_fullscreen():
+    set_dpi_awareness()
 
 import pygame as p
 
@@ -39,6 +52,13 @@ class Game:
         self.settings = GameSettings.from_json(file.read())
         p.mouse.set_visible(self.settings.MOUSE_VISIBLE)
 
+        # In fullscreen, render at the monitor's true native size. DPI awareness
+        # was already enabled at module load (see _wants_fullscreen), so this
+        # desktop size is the real pixel count, not a downscaled virtual one.
+        if self.settings.FULLSCREEN:
+            native_w, native_h = p.display.get_desktop_sizes()[0]
+            self.settings.SCREEN_W, self.settings.SCREEN_H = native_w, native_h
+
         self.GAME_W, self.GAME_H = 1920, 1080
         self.GAME_SCREEN_RATIO = (
             int(float(self.GAME_W) / self.settings.SCREEN_W),
@@ -51,9 +71,12 @@ class Game:
         # via render_foreground() and it's composited last.
         self.fg_canvas = p.Surface((self.GAME_W, self.GAME_H), p.SRCALPHA)
 
+        window_flags = p.OPENGL | p.DOUBLEBUF | (
+            p.FULLSCREEN if self.settings.FULLSCREEN else p.RESIZABLE
+        )
         self.screen = p.display.set_mode(
             (self.settings.SCREEN_W, self.settings.SCREEN_H),
-            p.RESIZABLE | p.OPENGL | p.DOUBLEBUF,
+            window_flags,
             vsync=0,
         )
 

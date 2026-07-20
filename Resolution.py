@@ -40,10 +40,13 @@ def set_dpi_awareness():
         print("Could not set DPI awareness:", e)
 
 
-# call BEFORE importing pygame
-set_dpi_awareness()
+# NOTE: DPI awareness is opt-in. Import this module freely without side effects;
+# call set_dpi_awareness() explicitly (before importing pygame) if you want it.
+# It's off by default because per-monitor awareness makes window sizes swing when
+# moving between different-DPI screens, which is a pain during development.
 
 if __name__ == "__main__":
+    set_dpi_awareness()
     import pygame
 
     pygame.init()
