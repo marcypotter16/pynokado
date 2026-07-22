@@ -7,6 +7,7 @@ import pygame as p
 
 from GameObject import GameObject
 from Models.Card import Card, _tint_ink
+from Models.Terrain import NoiseParams, SunParams, Terrain
 from Utils.Colors import BLUE, GREEN, WHITE
 
 class BoardStates(Enum):
@@ -14,14 +15,18 @@ class BoardStates(Enum):
     ADD_BRUSH_STATE = 2
 
 class GridNode:
-    def __init__(self, content: Card = None):
+    def __init__(self, content: Card | None = None):
         self.content = content
-        self.neighbors: dict[str, "GridNode"] = {
+        self.neighbors: dict[str, "GridNode | None" ] = {
             "north": None,
             "south": None,
             "east": None,
             "west": None
         }
+
+def to_int_coords(vec: p.Vector2) -> tuple[int, int]:
+    return (int(vec.x), int(vec.y))
+
 
 class Board(GameObject):
     MAX_SIZE = 13
@@ -68,13 +73,30 @@ class Board(GameObject):
         self._available_new_nodes = []
         self._build_starting_board()
 
+        # --- TERRAIN ---
+        self.terrain_map_size = (512, 512)
+        self.terrain_rect = p.Rect((0, 0), (1024, 1024))
+        self.terrain_rect.center = self.game.GAME_CENTER
+        # TODO: noise.pnoise2's `base` indexes a 256-entry permutation table --
+        # values outside [0,255] silently degenerate for ~1/3 of integers (one
+        # axis of the noise becomes constant, i.e. visible stripes). Clamped to
+        # 255 here as the immediate fix; the real fix belongs in NoiseParams /
+        # generate_height_map itself (e.g. `seed % 256`) so no caller can hit
+        # this footgun again.
+        self.terrain = Terrain(
+            height_noise_params=NoiseParams(self.terrain_map_size, seed=random.randint(0, 255)),
+            moisture_noise_params=NoiseParams(self.terrain_map_size, seed=random.randint(0, 255)),
+            sun_params=SunParams(),
+            bounding_rect=self.terrain_rect
+        )
+
     def _build_starting_board(self):
         center_coords = p.Vector2(1, 1) * (self.MAX_SIZE - 1) / 2
         bottom_right_coords = center_coords - p.Vector2(1, 1) * (self.STARTING_SIZE - 1) / 2
         for row in range(self.STARTING_SIZE):
             for col in range(self.STARTING_SIZE):
-                coord = tuple(bottom_right_coords + p.Vector2(row, col))
-                self.vertices[coord] = GridNode()
+                coord = bottom_right_coords + p.Vector2(row, col)
+                self.vertices[to_int_coords(coord)] = GridNode()
         self._update_node_neighbors()
         self._calc_board_lines()
 
@@ -232,7 +254,7 @@ class Board(GameObject):
     def _stroke_ink(self, rng: random.Random) -> tuple[int, int, int]:
         """INK, lightened or darkened a little, for one stroke."""
         d = rng.randint(-self.INK_LOAD_VARIATION, self.INK_LOAD_VARIATION)
-        return tuple(max(0, min(255, c + d)) for c in self.INK)
+        return tuple(max(0, min(255, c + d)) for c in self.INK) # type: ignore
 
     def _bake_board_surface(self) -> p.Surface:
         """Draw every run onto one surface, once. The scale/flip/rotate/tint per
@@ -271,6 +293,7 @@ class Board(GameObject):
         surf.blit(self._board_surface, (0, 0))
 
     def render(self, surf: p.Surface):
+        self.terrain.render(surf)
         self.render_board(surf)
         if self.board_state == BoardStates.ADD_BRUSH_STATE and self.game.cursorpos:
             # Suppress Game's default circle cursor this frame; draw the brush instead.

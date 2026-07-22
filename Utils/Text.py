@@ -31,9 +31,9 @@ def draw_centered_text(
     font: pygame.font.Font,
     surface: pygame.Surface,
     text: str,
-    color: tuple,
+    color: pygame.Color | tuple,
     rect: pygame.Rect,
-    _offset: pygame.Vector2 = (0, 0)
+    _offset: pygame.Vector2 = pygame.Vector2(0, 0)
 ):
     """
     Draws text centered in a rect using pygame.font.Font

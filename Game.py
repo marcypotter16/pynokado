@@ -1,5 +1,5 @@
 import os
-from typing import Dict
+from typing import Callable, Dict
 
 import moderngl
 
@@ -36,7 +36,7 @@ from Utils.Text import draw_centered_text
 class Game:
     def __init__(self, workdir: str = os.getcwd(), use_shaders: bool = False):
         self.need_key_event_handling = True
-        self.events = None
+        self.events: list[p.event.Event] = []
         self.clock = p.time.Clock()
         self.font_dir = None
         self.assets_dir = None
@@ -64,7 +64,7 @@ class Game:
             int(float(self.GAME_W) / self.settings.SCREEN_W),
             int(float(self.GAME_H) / self.settings.SCREEN_H),
         )
-        self.GAME_CENTER = (self.GAME_W / 2, self.GAME_H / 2)
+        self.GAME_CENTER = (int(self.GAME_W / 2), int(self.GAME_H / 2))
         self.game_canvas = p.Surface((self.GAME_W, self.GAME_H))
         # Foreground canvas: drawn OVER the glow pass (e.g. a lifted/dragged
         # card), so the glow sits behind it. Transparent; states blit onto it
@@ -91,7 +91,7 @@ class Game:
         self.game_canvas_offset: tuple[int, int] = (0, 0)
 
         # Post-render callbacks for GPU effects (called after main canvas render, before flip)
-        self.post_render_callbacks: list[callable] = []
+        self.post_render_callbacks: list[Callable] = []
 
         self._recompute_scaling()
         self.running, self.playing = True, True
@@ -125,7 +125,7 @@ class Game:
         #  value: list of render functions to call
         self.render_stack = {"background": [], "foreground": [], "above_all": []}
 
-        self.cursorpos = None
+        self.cursorpos: p.Vector2 = p.Vector2()
         # Set True by a state/board each frame it wants to draw its own cursor,
         # suppressing the default circle cursor. Reset to False after each render.
         self.custom_cursor = False
@@ -232,7 +232,7 @@ class Game:
         relative_x = max(0, min(relative_x, self.scaled_size[0]))
         relative_y = max(0, min(relative_y, self.scaled_size[1]))
         # Scale to game coordinates
-        self.cursorpos = (
+        self.cursorpos = p.Vector2(
             relative_x * self.screen_to_game_scale,
             relative_y * self.screen_to_game_scale,
         )
@@ -384,7 +384,7 @@ class Game:
         text: str,
         font_name: str,
         color: tuple | p.Color = (255, 255, 255),
-        target_width: int = None,
+        target_width: int | None = None,
         antialias: bool = True,
         base_font_size: int = 20,
     ) -> p.Surface:

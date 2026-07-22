@@ -167,15 +167,17 @@ def remove_bg(surf: pygame.Surface, threshold: float = 220.0) -> pygame.Surface:
 
 from scipy.ndimage import binary_fill_holes, binary_dilation
 
-def knockout(surf):
-    """black ink + transparent bg -> black ink on opaque white body."""
+def knockout(surf, background_color=(255, 255, 255)):
+    """black ink + transparent bg -> black ink on opaque `background_color` body.
+    Defaults to white; pass a parchment tint to blend the knocked-out body into
+    the page instead of standing out as a white patch."""
     alpha = pygame.surfarray.array_alpha(surf) > 128      # or: ink mask from color
     body = binary_fill_holes(alpha)                        # closes the mountain interior
     body = binary_dilation(body, iterations=2)             # slight halo beyond the outline
     out = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
     arr = pygame.surfarray.pixels3d(out)
     a = pygame.surfarray.pixels_alpha(out)
-    arr[body] = (255, 255, 255)
+    arr[body] = background_color[:3]
     a[body] = 255
     del arr, a
     out.blit(surf, (0, 0))                                 # ink on top
