@@ -7,7 +7,8 @@ import pygame as p
 
 from GameObject import GameObject
 from Models.Card import Card, _tint_ink
-from Models.Terrain import NoiseParams, SunParams, Terrain
+from Models.Terrain import Biome, NoiseParams, SunParams, Terrain, TerrainMode
+from Models.Weather import Weather
 from Utils.Colors import BLUE, GREEN, WHITE
 
 class BoardStates(Enum):
@@ -74,8 +75,8 @@ class Board(GameObject):
         self._build_starting_board()
 
         # --- TERRAIN ---
-        self.terrain_map_size = (512, 512)
-        self.terrain_rect = p.Rect((0, 0), (1024, 1024))
+        self.terrain_map_size = (450, 256)
+        self.terrain_rect = p.Rect((0, 0), (1800, 1024))
         self.terrain_rect.center = self.game.GAME_CENTER
         # TODO: noise.pnoise2's `base` indexes a 256-entry permutation table --
         # values outside [0,255] silently degenerate for ~1/3 of integers (one
@@ -89,6 +90,25 @@ class Board(GameObject):
             sun_params=SunParams(),
             bounding_rect=self.terrain_rect
         )
+
+        # --- WEATHER ---
+        # Live layer over the baked map: clouds sitting on the peaks, snow
+        # falling out of them. Everything about how it works is in
+        # Models/Weather.py; all it needs from here is where the high ground is
+        # and how big the terrain is drawn.
+        #
+        # The area of interest is snow AND mountain, weighted so the caps count
+        # for more -- weather gathers on the cold high ground rather than
+        # spreading evenly over the whole range.
+        #
+        # fog stays OFF: Terrain already bakes a static haze into the glyph map
+        # (BIOME_HAZE), and the two do the same job of filling the paper between
+        # glyphs. Both on double-tints the same gaps.
+        aoi = (Terrain.get_biome_mask(self.terrain.biome_mat, Biome.MOUNTAIN)
+               + 1.4 * Terrain.get_biome_mask(self.terrain.biome_mat, Biome.SNOW))
+        self.weather = Weather(aoi, self.terrain.render_size,
+                               seed=self.terrain.noise_params.seed, fog=False,
+                               origin=self.terrain_rect.topleft)
 
     def _build_starting_board(self):
         center_coords = p.Vector2(1, 1) * (self.MAX_SIZE - 1) / 2
@@ -125,6 +145,9 @@ class Board(GameObject):
         )
         self._show_extendable_nodes = self.board_state == BoardStates.ADD_BRUSH_STATE
 
+    def change_terrain_mode(self, new_terrain_mode: TerrainMode):
+        self.terrain.change_mode(new_terrain_mode)
+
     def _in_bounds(self, coord: tuple[int, int]) -> bool:
         """Coords run 0..MAX_SIZE-1; outside that the grid would grow off the
         centred full span (and eventually off-screen)."""
@@ -148,6 +171,7 @@ class Board(GameObject):
         self._show_extendable_nodes = not self._show_extendable_nodes
 
     def update(self, dt: float):
+        self.weather.update(dt)
         for event in self.game.events:
             if event.type == p.KEYDOWN:
                 if event.key == p.K_a:
@@ -294,6 +318,9 @@ class Board(GameObject):
 
     def render(self, surf: p.Surface):
         self.terrain.render(surf)
+        # Between the land and the board: weather sits over the map it falls
+        # on, but under the pieces played on top of it.
+        self.weather.render(surf)
         self.render_board(surf)
         if self.board_state == BoardStates.ADD_BRUSH_STATE and self.game.cursorpos:
             # Suppress Game's default circle cursor this frame; draw the brush instead.

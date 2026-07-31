@@ -4,8 +4,11 @@ import pygame as p
 
 from GameObject import GameObject
 from Models.Board import Board
+from Models.Terrain import TerrainMode
 from States.State import State
-from UI.Button import ImageButton
+from UI.Button import ImageButton, TextButton
+from UI.Containers import VertContainer
+from UI.Grid import UIGrid
 from Utils.Image import age_parchment
 
 
@@ -27,7 +30,7 @@ class BoardTestState(State):
 
         paper_path = os.path.join(
             game.assets_dir, "sprites", "midjourney-session", "paper-texture.jpg"
-        )
+        ) # type: ignore
         # Baked once: the tint/vignette pass is far too slow to run per frame.
         self.paper = PaperBackground(age_parchment(
             p.transform.smoothscale(
@@ -52,6 +55,43 @@ class BoardTestState(State):
             corner_radius=8,
             command=self.board.toggle_brush_mode,
             hover_animation=[brush_icon],
+        )
+
+        self.map_menu = VertContainer(
+            self.canvas,
+            x=int(0.85 * self.game.GAME_W),
+            y=int(0.8 * self.game.GAME_H),
+            width=int(0.1 * self.game.GAME_W),
+            height=200,
+            bg_color=(200, 200, 200, 200),
+            pad=(5, 5)
+        )
+
+        self.map_menu.add_child(
+            TextButton(
+                self.map_menu,
+                text="glyphmap",
+                command=lambda: self.board.change_terrain_mode(TerrainMode.GLYPHMAP),
+                bg_color=(190, 190, 190)
+            ),
+        )
+
+        self.map_menu.add_child(
+            TextButton(
+                self.map_menu,
+                text="colmap",
+                command=lambda: self.board.change_terrain_mode(TerrainMode.COLOURMAP),
+                bg_color=(190, 190, 190)
+            ),
+        )
+
+        self.map_menu.add_child(
+            TextButton(
+                self.map_menu,
+                text="heightmap",
+                command=lambda: self.board.change_terrain_mode(TerrainMode.HEIGHTMAP),
+                bg_color=(190, 190, 190)
+            ),
         )
 
     def update(self, delta_time):

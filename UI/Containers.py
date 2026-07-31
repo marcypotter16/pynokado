@@ -29,12 +29,12 @@ class VertContainer(UIContainer):
 
     def add_child(self, child: UIElement):
         super().add_child(child)
-        # child.pack(
-        #     side="vert",
-        #     padx=self.pad[0],
-        #     pady=self.pad[1],
-        #     modify_dimensions_to_fit=self.modify_children_dimensions_to_fit,
-        # )
+        self.pack(
+            side="vert",
+            padx=self.pad[0],
+            pady=self.pad[1],
+            modify_dimensions_to_fit=self.modify_children_dimensions_to_fit,
+        )
 
 
 class HorizContainer(UIContainer):

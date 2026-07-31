@@ -13,18 +13,28 @@ from Utils.Colors import WHITE
 class EmitterType(Enum):
     SPRITE = 0
 
+# What pygame's Vector2/Color constructors actually accept. The emitters here
+# are routinely called with plain tuples, so the parameters say so rather than
+# claiming Vector2 and being passed something else.
+Vec2Like = p.Vector2 | tuple[float, float]
+ColorLike = p.Color | tuple[int, int, int] | tuple[int, int, int, int]
+
 class Particle:
     def __init__(
             self,
-            pos: p.Vector2 = (0, 0),
-            vel: p.Vector2 = (0, 0),
-            col: p.Color = WHITE,
+            pos: Vec2Like = (0, 0),
+            vel: Vec2Like = (0, 0),
+            col: ColorLike = WHITE,
             rad: float = 5.0,
             lifespan: float = 10.0
         ):
-        self.pos = pos
-        self.vel = vel
-        self.col = col
+        # Converted, not stored as given: update() does `pos + vel * dt` and
+        # the glow code reads `col.r`, so a tuple that got this far would only
+        # fail later, on the first tick. The defaults above are tuples, which
+        # means a bare Particle() used to be exactly that trap.
+        self.pos = p.Vector2(pos)
+        self.vel = p.Vector2(vel)
+        self.col = p.Color(*col) if not isinstance(col, p.Color) else col
         self.rad = rad
         self.lifespan = lifespan
         self._timer = 0.0
@@ -37,8 +47,10 @@ class Particle:
         # out of sync, plus the base grey/alpha to modulate against (so the
         # per-frame glow doesn't compound). base_alpha is set by the lifespan fade.
         self.glow_seed = random.uniform(0, 1000)
-        self.base_grey = col.r
-        self.base_alpha = col.a
+        # Read off the converted colour, not the argument -- `col` may still be
+        # the tuple the caller passed.
+        self.base_grey = self.col.r
+        self.base_alpha = self.col.a
 
     def update(self, dt: float):
         self.pos = self.pos + self.vel * dt
@@ -57,9 +69,9 @@ class Particle:
 class Particles2D(ABC):
     def __init__(
             self,
-            pos: p.Vector2 = (0, 0),
-            min_vel: p.Vector2 = (0, 0),
-            max_vel: p.Vector2 = (100, 100),
+            pos: Vec2Like = (0, 0),
+            min_vel: Vec2Like = (0, 0),
+            max_vel: Vec2Like = (100, 100),
             min_rad: float = 2.0,
             max_rad: float = 8.0,
             min_dur: float = 1.0,
@@ -69,8 +81,13 @@ class Particles2D(ABC):
             min_spawn_interval: float = 2.0,
             max_spawn_interval: float = 5.0,
             max_particles: int = 100,
-            emitter_type: EmitterType = EmitterType.SPRITE 
+            emitter_type: EmitterType = EmitterType.SPRITE
         ):
+        # NOTE the subclasses below repeat this signature without annotations,
+        # so their defaults alone decide the inferred types -- an int default
+        # there types the parameter as int no matter what it says here, and a
+        # caller passing seconds as a float gets flagged. Hence the float
+        # literals all the way down.
         super().__init__()
         self.pos = pos
         self.min_vel = min_vel
@@ -141,18 +158,18 @@ class Particles2D(ABC):
 class CPU_Particles_2D(Particles2D):
     def __init__(
             self,
-            pos=(0, 0),
-            min_vel=(0, 0),
-            max_vel=(100, 100),
-            min_rad=2.0,
-            max_rad=8.0,
-            min_dur=1.0,
-            max_dur=10.0,
+            pos: Vec2Like = (0, 0),
+            min_vel: Vec2Like = (0, 0),
+            max_vel: Vec2Like = (100, 100),
+            min_rad: float = 2.0,
+            max_rad: float = 8.0,
+            min_dur: float = 1.0,
+            max_dur: float = 10.0,
             min_col=p.Color(0, 0, 0, 0),
             max_col=p.Color(255, 255, 255),
-            min_spawn_interval=2.0,
-            max_spawn_interval=5.0,
-            max_particles=100,
+            min_spawn_interval: float = 2.0,
+            max_spawn_interval: float = 5.0,
+            max_particles: int = 100,
             emitter_type=EmitterType.SPRITE
         ):
         super().__init__(
@@ -223,20 +240,20 @@ class Dust2D(CPU_Particles_2D):
 
     def __init__(
             self,
-            pos=(0, 0),
+            pos: Vec2Like = (0, 0),
             min_speed: float = 20.0,
             max_speed: float = 60.0,
-            direction: p.Vector2 = (1, 0),
+            direction: Vec2Like = (1, 0),
             scatter: float = pymath.pi / 2,
-            min_rad=2,
-            max_rad=8,
-            min_dur=1,
-            max_dur=10,
-            min_spawn_interval=2,
-            max_spawn_interval=5,
-            max_particles=100,
+            min_rad: float = 2.0,
+            max_rad: float = 8.0,
+            min_dur: float = 1.0,
+            max_dur: float = 10.0,
+            min_spawn_interval: float = 2.0,
+            max_spawn_interval: float = 5.0,
+            max_particles: int = 100,
             emitter_type=EmitterType.SPRITE,
-            dust_params: DustParams = None
+            dust_params: DustParams | None = None
         ):
 
         super().__init__(pos, (0, 0), (0, 0), min_rad, max_rad, min_dur, max_dur,

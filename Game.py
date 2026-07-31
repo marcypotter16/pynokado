@@ -39,7 +39,7 @@ class Game:
         self.events: list[p.event.Event] = []
         self.clock = p.time.Clock()
         self.font_dir = None
-        self.assets_dir = None
+        self.assets_dir: str = ""
         self.font_medium = None  # This has to be set!
         self.title_screen = None
         self.show_stats = True

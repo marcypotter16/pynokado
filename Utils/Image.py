@@ -2,7 +2,7 @@ from os import getcwd
 from os.path import join
 
 import pygame
-from numpy import clip, float32, ndarray, roll, uint8
+from numpy import clip, float32, maximum, ndarray, roll, uint8
 
 
 def images_from_spritesheet(
@@ -12,6 +12,7 @@ def images_from_spritesheet(
     Very useful function that returns a list of images based on a tiled spritesheet.
     You can use for example Aseprite to create an animation, then export the animation as a spritesheet,
     and finally use this function to get all the frames at once, without needing to crop or export single frames.
+
     :param path: path of the spritesheet
     :param tilesize: a tuple of 2 ints, representing the width and height of each frame in the animation
     :return: a list of the images (pygame images) of the animation.
@@ -22,7 +23,7 @@ def images_from_spritesheet(
     images: list[pygame.Surface] = []
     while y < max_y:
         while x < max_x:
-            subsurface_rect = pygame.rect.Rect((x, y), tilesize)
+            subsurface_rect = pygame.Rect((x, y), tilesize)
             image = full_img.subsurface(subsurface_rect)
             images.append(image)
             x += tilesize[0]
@@ -167,12 +168,43 @@ def remove_bg(surf: pygame.Surface, threshold: float = 220.0) -> pygame.Surface:
 
 from scipy.ndimage import binary_fill_holes, binary_dilation
 
-def knockout(surf, background_color=(255, 255, 255)):
+def knockout(surf, background_color=(255, 255, 255), fill="holes"):
     """black ink + transparent bg -> black ink on opaque `background_color` body.
     Defaults to white; pass a parchment tint to blend the knocked-out body into
-    the page instead of standing out as a white patch."""
+    the page instead of standing out as a white patch.
+
+    `fill` decides how the body is derived from the ink, and the two cases are
+    genuinely different shapes:
+
+    - "holes" (default) fills enclosed interiors. Right for a CLOSED silhouette
+      like a tree, whose outline surrounds its own inside.
+    - "span" fills, in each column, everything BETWEEN the topmost and
+      bottommost ink. Right for a shape whose interior isn't enclosed, like the
+      mountains: drawn as a ridgeline over a base with open sides, they have no
+      hole for "holes" to find, so it returns the peak with a few specks in it
+      and the flanks still transparent.
+
+    Two failure modes this avoids, both of which produce a white BLOCK rather
+    than a mountain. Flood-filling from outside leaks through the open sides --
+    that is exactly what happened to the pre-baked `*_knockout.png` mountains,
+    whose bottom corners are opaque. Filling everything below the ridgeline
+    instead can't leak sideways, but it runs on to the bottom edge of the
+    sprite, squaring off the base wherever the art has padding under it.
+    Bounding the fill by the ink at BOTH ends is what keeps it inside the
+    drawing on all four sides.
+    """
     alpha = pygame.surfarray.array_alpha(surf) > 128      # or: ink mask from color
-    body = binary_fill_holes(alpha)                        # closes the mountain interior
+    if fill == "span":
+        # surfarray is (x, y), so axis=1 runs down the sprite. Accumulating a
+        # running max from each end gives "ink at or above" and "ink at or
+        # below"; a pixel is inside the drawing exactly where both hold.
+        from_top = maximum.accumulate(alpha, axis=1)
+        from_bottom = maximum.accumulate(alpha[:, ::-1], axis=1)[:, ::-1]
+        body = from_top & from_bottom
+    elif fill == "holes":
+        body = binary_fill_holes(alpha)                    # closes the tree interior
+    else:
+        raise ValueError(f"knockout: fill must be 'holes' or 'span', got {fill!r}")
     body = binary_dilation(body, iterations=2)             # slight halo beyond the outline
     out = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
     arr = pygame.surfarray.pixels3d(out)

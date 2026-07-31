@@ -1,0 +1,22 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "standard",
+  "include": [
+    "Collections",
+    "Models",
+    "States",
+    "UI",
+    "Utils",
+    "Game.py",
+    "GameObject.py",
+    "main.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    ".venv",
+    "scratch"
+  ]
+}
