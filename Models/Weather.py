@@ -45,11 +45,20 @@ WHERE THE WEATHER IS
     which is why they share a class rather than merely resembling each other.
 
 SNOW
-    Snow does not fall from the whole cloud. A handful of SOURCES -- points, or
-    horizontal stripes -- are picked inside it, weighted by density so they land
-    where there is actually cloud, and placed at its underside. They are
-    re-picked every few seconds, so squalls start, drift and stop instead of the
-    whole range sitting under uniform snowfall forever.
+    Snow is emitted from a SHAPE -- see SpawnSource and its three subclasses,
+    PointSource, StripeSource and AreaSource. An emitter takes any of them, so
+    what a source looks like is one decision and how particles behave is
+    another.
+
+    Weather uses an AreaSource over the snowy ground itself. The earlier
+    approach picked segments of the cloud's UNDERSIDE, density-weighted, and
+    let snow fall from those; it survives on CloudField (_pick_sources, used by
+    the judgement rig) but is no longer how the real map snows. The reason is
+    that a cloud's AOI deliberately reaches further than the snow does -- down
+    the mountain flanks, so the range reads as overcast -- so which parts of it
+    hang over actual snow is a poor proxy for where snow should land, and no
+    amount of weighting the underside segments fixes that. Handed the snowy
+    region directly, an area source needs no weighting and no re-picking timer.
 
     Flakes are drawn UNDER the cloud layer, so they emerge from beneath it
     rather than appearing on top of the thing they are falling out of.
@@ -159,6 +168,12 @@ class CloudField:
         self._source_age = 0.0
 
         self._density = np.zeros(self.shape)
+        # Same alpha smoothstep-to-0 vignette Terrain.border_fade puts on the
+        # whole canvas, sized to the work grid instead: without it the band's
+        # own rectangle -- not the AOI, which is already soft via `mask` --
+        # cuts the noise off in a hard edge wherever that rectangle doesn't
+        # happen to land on the canvas border.
+        self._border_fade = Terrain.border_fade(self.shape)
         # Per column, the lowest work row still holding cloud. Filled by
         # update(); starts at the bottom row so a source picked before the
         # first update still lands inside the band.
@@ -295,9 +310,17 @@ class CloudField:
         self._render(d, lit, alpha)
 
         # Per column, the lowest row still holding cloud -- the underside snow
-        # comes off. argmax on the reversed column finds the last True; columns
-        # with no cloud never get picked, so their value doesn't matter.
-        self._bottom = rows - 1 - np.argmax((d > 0.05)[::-1], axis=0)
+        # comes off. argmax on the reversed column finds the last True, but
+        # argmax on an all-False column (no cloud in it at all) returns 0, which
+        # would silently read back as "cloud all the way to the grid's bottom
+        # row" -- and a source stripe (_pick_sources) spans several columns, so
+        # an empty neighbour's bogus bottom can win the max and drag the whole
+        # stripe down to the very bottom of the band. -1 marks "no cloud here"
+        # so _pick_sources can skip it instead.
+        has_cloud = (d > 0.05).any(axis=0)
+        bottom = rows - 1 - np.argmax((d > 0.05)[::-1], axis=0)
+        bottom[~has_cloud] = -1
+        self._bottom = bottom
 
         self._source_age += dt
         if not self.sources or self._source_age >= self.source_lifetime:
@@ -314,13 +337,13 @@ class CloudField:
             band = Terrain.contour(d > 0.35, thickness=1.0, align="center", soft=True)
             rgba = np.zeros((rows, cols, 4), dtype=np.uint8)
             rgba[:, :, :3] = (60, 52, 44)
-            rgba[:, :, 3] = (band * 210).astype(np.uint8)
+            rgba[:, :, 3] = (band * 210 * self._border_fade).astype(np.uint8)
         else:
             lo, hi = (np.array(c, dtype=float) for c in CLOUD_PALETTES[style])
             rgb = lo + (hi - lo) * lit[:, :, None]
             rgba = np.empty((rows, cols, 4), dtype=np.uint8)
             rgba[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
-            rgba[:, :, 3] = (np.clip(alpha, 0.0, 1.0) * 255).astype(np.uint8)
+            rgba[:, :, 3] = (np.clip(alpha, 0.0, 1.0) * self._border_fade * 255).astype(np.uint8)
 
         small = p.Surface((cols, rows), p.SRCALPHA)
         Terrain.to_pygame_surf(rgba, small)
@@ -337,7 +360,13 @@ class CloudField:
         would be snow falling out of clear sky. Re-picked on a timer, which is
         what turns steady snowfall into squalls that come and go -- and since
         the weighting follows the density, they follow the weather as it
-        drifts rather than sitting at fixed spots under a moving cloud."""
+        drifts rather than sitting at fixed spots under a moving cloud.
+
+        NOTE this is the cloud-underside variant, kept for the judgement rig
+        in States/SnowTestState.py. Weather itself now emits snow from an
+        AreaSource over the snowy ground -- see Weather.__init__ -- because
+        which segments of a cloud's underside happen to sit over snow is a
+        poor proxy for where snow should fall."""
         rows, cols = self.shape
         weight = self._density.sum(axis=0)
         total = weight.sum()
@@ -355,9 +384,22 @@ class CloudField:
             # A stripe hangs off the underside along its whole width, so take
             # the LOWEST cloud across the columns it spans rather than the one
             # under its centre -- otherwise one end can start above the cloud.
+            # -1 entries are columns with no cloud (see update()) and must be
+            # dropped before the max, or one empty neighbour drags the whole
+            # stripe's source down to the bottom of the band.
             lo = max(0, int((x - half - self.band.x) / cell_w))
             hi = min(cols - 1, int((x + half - self.band.x) / cell_w))
-            row = int(self._bottom[lo:hi + 1].max()) if lo <= hi else int(self._bottom[col])
+            span = self._bottom[lo:hi + 1] if lo <= hi else self._bottom[col:col + 1]
+            valid = span[span >= 0]
+            if valid.size:
+                row = int(valid.max())
+            elif self._bottom[col] >= 0:
+                row = int(self._bottom[col])
+            else:
+                # Picked column itself never crosses the 0.05 threshold either
+                # (it was chosen on raw density weight, not the thresholded
+                # mask) -- fall back to where its density peaks.
+                row = int(np.argmax(self._density[:, col]))
             y = self.band.y + (row + 0.5) * self.band.h / rows
             self.sources.append((x - half, x + half, y))
 
@@ -380,6 +422,87 @@ def _smoothstep(lo: float, hi: float, x: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
+class SpawnSource:
+    """Where an emitter's particles are born, as a SHAPE rather than a point.
+
+    SnowEmitter takes any zero-argument callable returning a position (or None
+    for "nothing to emit right now"), so these are simply callables of three
+    shapes -- point, stripe, area -- and any emitter can use any of them.
+
+    The area one is the reason this exists. Snow over a map is not a thing
+    falling out of a line; it's weather over a REGION, and picking a handful of
+    line segments on a cloud's underside and hoping they cover the right ground
+    was always an approximation of that. Handed the region directly, an area
+    source needs no weighting, no re-picking on a timer, and no reasoning about
+    which columns of a cloud overlap which part of the terrain."""
+
+    def __call__(self) -> p.Vector2 | None:
+        raise NotImplementedError
+
+
+class PointSource(SpawnSource):
+    """Everything from one spot. A fountain, a chimney, a leak."""
+
+    def __init__(self, pos: p.Vector2 | tuple[float, float]):
+        self.pos = p.Vector2(pos)
+
+    def __call__(self) -> p.Vector2 | None:
+        # A copy: the caller hands this straight to a Particle, which then
+        # integrates it in place -- handing out the same vector every time
+        # would have every particle share (and move) one position.
+        return p.Vector2(self.pos)
+
+
+class StripeSource(SpawnSource):
+    """Uniform along a horizontal segment: rain off a gutter, a snow squall,
+    anything with a width but no depth."""
+
+    def __init__(self, x0: float, x1: float, y: float):
+        self.x0, self.x1, self.y = x0, x1, y
+
+    def __call__(self) -> p.Vector2 | None:
+        return p.Vector2(random.uniform(self.x0, self.x1), self.y)
+
+
+class AreaSource(SpawnSource):
+    """Uniform over a REGION given as a data-space mask plus the render rect
+    that mask maps onto.
+
+    `mask` is (rows, cols) in data space -- a biome mask straight out of
+    Terrain -- and `rect` is where that whole field is drawn on screen, so the
+    caller passes the two things it already has and this works out the mapping.
+    Cells above `threshold` are the region; one is drawn uniformly and the
+    position jittered inside it, which is uniform over the AREA because the
+    cells are all the same size.
+
+    Precomputed to a flat list of cells at construction, so a spawn is one
+    random index rather than a scan -- this is called hundreds of times a
+    second at high snowfall.
+
+    `lift` raises every spawn by that many pixels, for particles that should
+    fall ONTO the region rather than start inside it."""
+
+    def __init__(self, mask: np.ndarray, rect: p.Rect,
+                 threshold: float = 0.0, lift: float = 0.0):
+        m = np.asarray(mask, dtype=float)
+        self.rows, self.cols = m.shape
+        self.rect = rect
+        self.lift = lift
+        self._cells = np.argwhere(m > threshold)      # (n, 2) of (row, col)
+
+    def __call__(self) -> p.Vector2 | None:
+        n = len(self._cells)
+        if n == 0:
+            return None
+        row, col = self._cells[random.randrange(n)]
+        cell_w = self.rect.w / self.cols
+        cell_h = self.rect.h / self.rows
+        return p.Vector2(
+            self.rect.x + (col + random.random()) * cell_w,
+            self.rect.y + (row + random.random()) * cell_h - self.lift,
+        )
+
+
 class SnowFlake(Particle):
     """A Particle that remembers where it was born.
 
@@ -395,10 +518,11 @@ class SnowFlake(Particle):
 class SnowEmitter(Dust2D):
     """Dust2D is a POINT source firing into a cone -- right for a dust puff,
     wrong for weather, which falls across a width. This takes a `source`
-    callable returning a spawn position, so the same emitter can rain from a
-    line or out of the underside of a cloud, and spawns at a steady RATE rather
-    than the base class's one-particle-per-interval (which caps at one per
-    frame and can't reach a snowfield's density).
+    callable returning a spawn position -- any SpawnSource: a point, a stripe,
+    or a whole area -- so the shape snow falls from is the caller's choice and
+    not baked in here. It also spawns at a steady RATE rather than the base
+    class's one-particle-per-interval (which caps at one per frame and can't
+    reach a snowfield's density).
 
     The base spawn is disabled by putting its interval out of reach; Dust2D's
     physics -- gravity, drag, turbulence, wind, gust -- is inherited untouched.
@@ -477,6 +601,19 @@ class Weather:
     hands over exactly what it already has: a biome mask and the size it draws
     the terrain at.
 
+    `snow_mask` is the REGION snow falls over, and it is deliberately not
+    `aoi`. `aoi` is free to be a wider, weighted field -- mountain flanks
+    lightly, the snowcap heavily, so the range reads as generally overcast --
+    while snow should land only on ground that is actually snowy. Pass the
+    narrower ground truth (e.g. just the SNOW biome mask) here; it becomes an
+    AreaSource and changes nothing about what the cloud looks like. None
+    falls back to `aoi`, i.e. snowing over the whole weather area.
+
+    `snow_lift` raises every spawn that many pixels above the region. It
+    defaults to `cloud_height`, which puts the snow's emission area on the
+    cloud layer -- that layer being the same region raised by the same amount
+    -- so flakes come out of the cloud rather than out of the ground.
+
     `fog` defaults OFF for a reason. Terrain bakes a static haze into the glyph
     map (see BIOME_HAZE), and that haze and this fog do the same job -- filling
     the paper between glyphs. Turning both on double-tints the same gaps.
@@ -495,7 +632,9 @@ class Weather:
                  coverage: float = 0.40, snowfall: float = 60.0,
                  flake_grey: int = 255, fall_distance: float = 26.0,
                  windy: bool = True, fog: bool = False,
-                 origin: tuple[int, int] = (0, 0)):
+                 origin: tuple[int, int] = (0, 0),
+                 snow_mask: np.ndarray | None = None,
+                 snow_lift: float | None = None):
         self.out_size = out_size
         self.clouds = CloudField(aoi, out_size, cloud_height=cloud_height,
                                  style=style, seed=seed, periods=(2, 3),
@@ -515,8 +654,26 @@ class Weather:
             self.fog.speed = 4.0
             self.fog.taper = (0.0, 1.0)
 
+        # Snow falls over an AREA -- the ground that is actually snowy -- not
+        # off a few segments of the cloud's underside. The cloud says where the
+        # weather is; this says where the snow lands, and the two are allowed
+        # to differ (the cloud AOI deliberately reaches down the flanks so the
+        # range reads as overcast, which is not ground that should be snowed
+        # on). Without a snow_mask there's no such distinction to draw, so the
+        # cloud's own AOI is the region.
+        region = snow_mask if snow_mask is not None else aoi
+        # Lifted by the cloud height by default, so snow is emitted from the
+        # band the CLOUD occupies rather than from the ground under it -- the
+        # cloud layer is that region raised by exactly this much, so raising
+        # the region by the same amount puts the two on top of each other.
+        # Without it flakes appear at ground level, i.e. out of the terrain
+        # instead of out of the weather.
+        self.snow_source = AreaSource(
+            region, p.Rect(origin, out_size),
+            lift=cloud_height if snow_lift is None else snow_lift)
+
         self.snow = SnowEmitter(
-            source=self.clouds.spawn_point, rate=snowfall, grey=flake_grey,
+            source=self.snow_source, rate=snowfall, grey=flake_grey,
             cull_below=origin[1] + out_size[1] + 20, fall_distance=fall_distance,
             # Slow drift, not a fall: terminal speed is gravity/drag, so 55/0.9
             # is about 60 px/s -- roughly a real flake, and slow enough that the

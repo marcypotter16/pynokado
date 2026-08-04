@@ -33,7 +33,12 @@ class Board(GameObject):
     MAX_SIZE = 13
     SNAP_DIST = 52           # how close to a point a drop must be to place
     EDGE_LENGTH = 72
-    INK = (30, 26, 22)       # brush black; pure black reads harsh on parchment
+    # Deep blood red, NOT the map's brush black (Terrain.INK). The board and
+    # the terrain are two different things drawn on the same paper, and in the
+    # same ink they read as one drawing -- the grid looks like part of the map
+    # rather than something laid over it. Dark enough to still read as ink on
+    # parchment rather than as paint; the hue is what separates the layers.
+    INK = (112, 26, 24)
     # Per-stroke lightness swing around INK. A brush carries a different load of
     # ink each time it's dipped, so no two lines are quite the same black.
     INK_LOAD_VARIATION = 18
@@ -97,18 +102,23 @@ class Board(GameObject):
         # Models/Weather.py; all it needs from here is where the high ground is
         # and how big the terrain is drawn.
         #
-        # The area of interest is snow AND mountain, weighted so the caps count
-        # for more -- weather gathers on the cold high ground rather than
-        # spreading evenly over the whole range.
+        # Two different regions, deliberately. The CLOUD area is snow AND
+        # mountain, weighted so the caps count for more -- weather gathers on
+        # the cold high ground but still reaches down the flanks, so the range
+        # reads as overcast rather than as one cloud on one peak. The SNOW
+        # area is just the snowcaps: flakes are emitted uniformly over it (an
+        # AreaSource, see Models/Weather.py), so snow lands on ground that is
+        # actually snowy instead of anywhere the cloud happens to overhang.
         #
         # fog stays OFF: Terrain already bakes a static haze into the glyph map
         # (BIOME_HAZE), and the two do the same job of filling the paper between
         # glyphs. Both on double-tints the same gaps.
-        aoi = (Terrain.get_biome_mask(self.terrain.biome_mat, Biome.MOUNTAIN)
+        aoi = (0.2 * Terrain.get_biome_mask(self.terrain.biome_mat, Biome.MOUNTAIN)
                + 1.4 * Terrain.get_biome_mask(self.terrain.biome_mat, Biome.SNOW))
+        snow_mask = Terrain.get_biome_mask(self.terrain.biome_mat, Biome.SNOW)
         self.weather = Weather(aoi, self.terrain.render_size,
                                seed=self.terrain.noise_params.seed, fog=False,
-                               origin=self.terrain_rect.topleft)
+                               origin=self.terrain_rect.topleft, snow_mask=snow_mask)
 
     def _build_starting_board(self):
         center_coords = p.Vector2(1, 1) * (self.MAX_SIZE - 1) / 2
@@ -320,7 +330,8 @@ class Board(GameObject):
         self.terrain.render(surf)
         # Between the land and the board: weather sits over the map it falls
         # on, but under the pieces played on top of it.
-        self.weather.render(surf)
+        if self.terrain.mode == TerrainMode.GLYPHMAP:
+            self.weather.render(surf)
         self.render_board(surf)
         if self.board_state == BoardStates.ADD_BRUSH_STATE and self.game.cursorpos:
             # Suppress Game's default circle cursor this frame; draw the brush instead.

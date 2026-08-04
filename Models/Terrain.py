@@ -1,8 +1,10 @@
 # I want to generate terrain with perlin noise.
 
-from dataclasses import dataclass
+# TODO remove scipy from uv (pillow is already gone: the PIL import that used
+# to sit above the __main__ preview block was dead, and the block itself now
+# lives in scratch/terrain_preview.py).
+
 from enum import Enum
-import math
 import random as pyrandom
 from typing import cast
 
@@ -14,478 +16,44 @@ import pygame as p
 from Models.Haze import haze_field
 from Utils.Image import knockout
 
-class TerrainMode(Enum):
-    HEIGHTMAP = 0
-    TEMPMAP = 1
-    BIOMESMAP = 2
-    SHADOWMAP = 3
-    GLYPHMAP = 4
-    COLOURMAP = 5
-
-class MoistureLevels(Enum):
-    DRY = 0
-    NORMAL = 1
-    WET = 2
-
-class TemperatureLevels(Enum):
-    COLD = 0
-    TEMPERATE = 1
-    HOT = 2
-
-class Biome(Enum):
-    SEASIDE = 0
-    PLAIN = 1
-    RAINFOREST = 2
-    MOUNTAIN = 3
-    SNOW = 4
-    CAVE = 5
-    TUNDRA = 6
-    TAIGA = 7
-    DESERT = 8
-    SAVANNAH = 9
-
-MOISTURE_THRESHOLDS: dict[tuple[float, float], MoistureLevels] = {
-    (0.0, 0.2): MoistureLevels.DRY,
-    (0.2, 0.8): MoistureLevels.NORMAL,
-    (0.8, 1.0): MoistureLevels.WET
-}
-
-# Operates on Terrain.normalize(temp_map), NOT raw degrees -- min_temperature is
-# re-rolled per terrain instance (see Terrain.__init__), so a fixed degree
-# cutoff would drift terrain-to-terrain. Normalizing keeps COLD/TEMPERATE/HOT
-# relative to THIS map's own range, same treatment as MOISTURE_THRESHOLDS.
-TEMPERATURE_THRESHOLDS: dict[tuple[float, float], TemperatureLevels] = {
-    (0.0, 0.35): TemperatureLevels.COLD,
-    (0.35, 0.65): TemperatureLevels.TEMPERATE,
-    (0.65, 1.0): TemperatureLevels.HOT,
-}
-
-BIOME_THRESHOLDS: dict[tuple[float, float], Biome] = {
-    (0.0, 0.1): Biome.SEASIDE,
-    (0.1, 0.5): Biome.PLAIN,
-    (0.5, 0.80): Biome.RAINFOREST,
-    # TEMP: widened for glyph testing (more mountain, snow kept minimal).
-    (0.8, 0.95): Biome.MOUNTAIN,
-    (0.95, 1.0): Biome.SNOW,
-    # we will think about CAVE later
-}
-
-BIOME_THRESHOLDS_REV: dict[Biome, tuple[float, float]] = dict((v, k) for k, v in BIOME_THRESHOLDS.items())
-
-# Simplified Whittaker biome diagram: (temperature, moisture) -> biome, for
-# everything that ISN'T gated purely by elevation (get_biome_from_val still
-# special-cases SEASIDE/MOUNTAIN/SNOW by height first -- those are about being
-# underwater/at altitude, not climate). Some biomes cover more than one cell,
-# same as a real Whittaker diagram's biomes bleeding across several bands.
-WHITTAKER_TABLE: dict[tuple[TemperatureLevels, MoistureLevels], Biome] = {
-    (TemperatureLevels.COLD, MoistureLevels.DRY):         Biome.TUNDRA,
-    (TemperatureLevels.COLD, MoistureLevels.NORMAL):      Biome.TAIGA,
-    (TemperatureLevels.COLD, MoistureLevels.WET):         Biome.TAIGA,
-    (TemperatureLevels.TEMPERATE, MoistureLevels.DRY):    Biome.PLAIN,
-    (TemperatureLevels.TEMPERATE, MoistureLevels.NORMAL): Biome.PLAIN,
-    (TemperatureLevels.TEMPERATE, MoistureLevels.WET):    Biome.RAINFOREST,
-    (TemperatureLevels.HOT, MoistureLevels.DRY):          Biome.DESERT,
-    (TemperatureLevels.HOT, MoistureLevels.NORMAL):       Biome.SAVANNAH,
-    (TemperatureLevels.HOT, MoistureLevels.WET):          Biome.RAINFOREST,
-}
-
-# WHITTAKER_TABLE as an array, so classification can be a single fancy-index
-# over whole maps instead of a per-cell dict lookup. Rows/cols are indexed by
-# BAND INDEX (position within TEMPERATURE_THRESHOLDS / MOISTURE_THRESHOLDS),
-# which is what Terrain._level_indices returns -- built from those dicts'
-# own order rather than the enums' so the two can never drift apart.
-_TEMPERATURE_LEVELS: list[TemperatureLevels] = list(TEMPERATURE_THRESHOLDS.values())
-_MOISTURE_LEVELS: list[MoistureLevels] = list(MOISTURE_THRESHOLDS.values())
-_WHITTAKER_LUT: np.ndarray = np.array(
-    [[WHITTAKER_TABLE[(t, m)].value for m in _MOISTURE_LEVELS] for t in _TEMPERATURE_LEVELS],
-    dtype=np.uint8,
+# The styling/classification surface lives in TerrainStyle.py. Re-exported here
+# so this module stays the single import point: every existing
+# `from Models.Terrain import Biome, NoiseParams, BIOME_GLYPHS, ...` keeps
+# working without a change at the call site.
+from Models.TerrainStyle import (
+    BIOME_CONTOURS,
+    BIOME_FIELDS,
+    BIOME_GLYPHS,
+    BIOME_HATCHES,
+    BIOME_HAZE,
+    BIOME_THRESHOLDS,
+    BIOME_THRESHOLDS_REV,
+    BIOME_TINTS,
+    HAZE_CELLS,
+    HAZE_COVERAGE,
+    HAZE_EDGE_GAIN,
+    HAZE_EDGE_SOFTNESS,
+    HAZE_VARIATION,
+    INK,
+    MOISTURE_THRESHOLDS,
+    TEMPERATURE_THRESHOLDS,
+    WHITTAKER_TABLE,
+    Biome,
+    ContourStyle,
+    FieldStyle,
+    GlyphStyle,
+    HatchStyle,
+    HazeStyle,
+    MoistureLevels,
+    NoiseParams,
+    SunParams,
+    TemperatureLevels,
+    TerrainMode,
+    _MOISTURE_LEVELS,
+    _TEMPERATURE_LEVELS,
+    _WHITTAKER_LUT,
 )
 
-# Faint wash colours, one per biome, drawn UNDER the ink strokes. Tuned to read
-# on the warm sepia parchment (~(226,208,176)): mostly desaturated and a shade
-# darker/cooler than the paper, so each biome is a distinguishable stain without
-# fighting the ink aesthetic. SEASIDE is the lone cool hue so water pops; PLAIN
-# sits nearest the paper (the "empty" default); CAVE is darkest.
-BIOME_TINTS: dict[Biome, p.Color] = {
-    Biome.SEASIDE: p.Color(126, 164, 178, 255),   # dusty blue-teal (water)
-    Biome.PLAIN: p.Color(214, 196, 150, 255),     # pale warm straw (near paper)
-    Biome.RAINFOREST: p.Color(122, 148, 108, 255),    # muted sage/olive
-    Biome.MOUNTAIN: p.Color(158, 148, 152, 255),  # cool stone grey-mauve
-    Biome.SNOW: p.Color(232, 234, 240, 255),
-    Biome.CAVE: p.Color(86, 84, 104, 255),        # deep indigo-charcoal (shadow)
-    Biome.TUNDRA: p.Color(176, 176, 168, 255),    # pale frost-grey lichen
-    Biome.TAIGA: p.Color(88, 118, 100, 255),      # deep boreal spruce-green
-    Biome.DESERT: p.Color(216, 178, 120, 255),    # warm sand/ochre
-    Biome.SAVANNAH: p.Color(198, 178, 96, 255),   # dry golden grassland
-}
-
-@dataclass
-class GlyphStyle:
-    """How one biome's glyphs are drawn. ALL THREE numbers are in RENDER
-    pixels, so a biome's glyph field looks the same on screen no matter how far
-    the terrain underneath is stretched:
-
-    - `size` -- how big the sprite lands on screen. Source sprites are
-      128-512px, so any size below that is a downscale and stays crisp.
-    - `spacing` -- the minimum gap between glyph centres on screen. Sampling
-      still happens on the data grid, so this gets divided by the scale factor
-      first (see Terrain._build_glyph_coords); what you set here is what you
-      measure on the finished image.
-    - `margin` -- the distance-to-border knob: glyph centres stay at least this
-      far from the edge of their biome. Keeps a biome's glyphs from crowding
-      its neighbours, and clear of any outline BIOME_CONTOURS inks on that
-      border. It's the distance to the glyph's CENTRE, so a sprite still
-      overhangs by up to half its size -- budget margin >= contour thickness +
-      size/2 for no touching at all. A region thinner than 2*margin gets no
-      glyphs, which is usually the right call for a pond.
-
-    Keep `spacing` BELOW `size` -- around 75% of it is a good starting point.
-    These sprites are line art: their ink covers only a quarter to a bit under
-    half of their square, so at spacing == size the sprite boxes merely touch
-    while the drawings themselves leave obvious gaps, and a forest reads as
-    scattered dots rather than a wood. Overlapping them is also just how hand
-    drawn maps look. Glyphs are stamped in paint order (ascending y, see
-    get_point_cloud_coords), so overlaps stack front-to-back correctly.
-
-    That's the whole point: stretch the terrain, and the glyphs neither grow
-    nor drift apart -- only which terrain they sit on changes.
-    """
-    paths: list[str]
-    size: int = 40           # render px
-    spacing: float = 40.0    # render px
-    margin: float = 12.0     # render px, distance from the biome's border
-    # Fill the sprite's interior with an opaque `knockout_colour` before
-    # stamping (Utils.Image.knockout). Turns line art the paper shows through
-    # into a solid body -- which is how a peak becomes a SNOW-capped peak
-    # rather than an outline. Note this must be done at stamp time rather than
-    # by pointing `paths` at the pre-baked `*_knockout.png` files: in those the
-    # fill escaped the open base and flooded the lower corners of the square
-    # (their bottom corners are alpha 255), so they stamp as white BLOCKS with
-    # a mountain drawn on them. Doing it here bounds the fill by the ink itself.
-    knockout: bool = False
-    knockout_colour: tuple[int, int, int] = (255, 255, 255)
-    # "holes" for closed silhouettes (trees), "span" for shapes whose interior
-    # isn't enclosed (mountains). See Utils.Image.knockout -- picking the wrong
-    # one is silent, it just gives back a sprite barely knocked out at all.
-    knockout_fill: str = "holes"
-    # How many differently-shaded knockouts to prepare per sprite, and how far
-    # apart (per channel) their bodies sit. One flat tone across a whole field
-    # of opaque glyphs makes it read as a single cut-out shape rather than as
-    # separate ones, so a handful of tones lets neighbours come apart. Costs a
-    # knockout pass per variant per sprite at bake time and nothing after.
-    knockout_variants: int = 1
-    knockout_spread: int = 0
-
-
-# Per-biome glyph sprite sets for GLYPHMAP compositing. Only biomes with actual
-# art go here -- _build_glyph_map only stamps the biomes present as keys, so
-# everything else just shows its flat BIOME_TINTS wash until more art exists.
-BIOME_GLYPHS: dict[Biome, GlyphStyle] = {
-    # TODO placeholder art -- a downloaded icon, not hand-drawn like the trees
-    # and mountains, so it reads a bit too geometric next to them. Redraw in
-    # the same ink style and drop the replacement in here.
-    # Listed first so waves stamp UNDER any land glyph that overhangs a shore.
-    Biome.SEASIDE: GlyphStyle(
-        paths=["Assets/sprites/glyphs/water/water-waves.png"],
-        size=34,
-        # Sparse on purpose: open water with a few wave marks reads as sea,
-        # where a dense field would read as texture and fight the coastline.
-        spacing=90.0,
-        # Clear of the shoreline: the 2px contour plus half a glyph, rounded up
-        # generously so waves sit in open water rather than lapping the ink.
-        margin=32.0,
-    ),
-    # Broadleaf only. tree2/tree3 are conifers and used to be mixed in here,
-    # which put spruce in the jungle and left the boreal biome with no art at
-    # all -- the two forests now split the set along the species line.
-    Biome.RAINFOREST: GlyphStyle(
-        paths=["Assets/sprites/glyphs/forest/tree1.png"],
-        size=24,
-        spacing=18.0,
-    ),
-    # Boreal forest: the same trees stand further apart than jungle canopy, and
-    # a taiga that reads as dense as a rainforest loses the distinction between
-    # them -- the glyphs are the only thing telling the two apart on the page.
-    #
-    # tree3 is the other conifer and belongs here, but it's watercolour, not
-    # ink: 62% of its pixels are partially transparent against 5-11% for tree1
-    # and tree2, which are clean cutouts. Stamped at this size its soft grey
-    # ground reads as a smudge around every tree. Add it once that background
-    # is knocked out; until then one sprite plus _stamp_glyphs' per-instance
-    # rotation and scale carries the variety.
-    Biome.TAIGA: GlyphStyle(
-        paths=["Assets/sprites/glyphs/forest/tree2.png"],
-        size=22,
-        spacing=26.0,
-    ),
-    # Peaks with a KNOCKOUT body: identical ink to MOUNTAIN below, over an
-    # opaque near-white flank instead of bare paper. That difference is the
-    # whole point -- SNOW sits at the top of a range, so it wants the same
-    # mountains as its neighbour, and the white flank is what makes them read
-    # as capped rather than as more of the same. It also finally fills the
-    # region: a snowfield stopped being a hole in the range the moment
-    # something opaque got stamped in it.
-    #
-    # Listed BEFORE Mountain, so the dark peaks stamp over the caps rather than
-    # the other way round. Snowcaps are the far, high ground: having the near
-    # ridges overlap them is what puts them behind the range instead of pasted
-    # on top of it, and it also stops a bright flank cutting across a dark
-    # summit that should be in front of it.
-    #
-    # Size and spacing sit CLOSE to MOUNTAIN's and should stay that way: a cap
-    # is the top of the range it's in, so peaks that were markedly bigger or
-    # sparser would read as a change of terrain rather than of altitude. The
-    # caps run slightly tighter (26.8 against 30.8) because their opaque bodies
-    # hide more of each other than line art does, so they need a little more
-    # crowding to read as equally dense. Hand-tuned in SnowTestState.
-    #
-    # That does mean opaque bodies at spacing well below size, which the rule
-    # in GlyphStyle's docstring warns against -- and the warning is real, it's
-    # what merged an earlier attempt into one white blob. It's survivable here
-    # only because `knockout_fill="span"` bounds each body to the mountain's
-    # own silhouette: overlapping peaks still show their ink outline against
-    # the white flank behind, so they layer like a range instead of dissolving.
-    # Widen the spacing before reaching for a bigger size if it stops reading.
-    # Margin stays small so the modest caps get any glyphs at all.
-    Biome.SNOW: GlyphStyle(
-        paths=[
-            "Assets/sprites/glyphs/mountain/mountain1_og.png",
-            "Assets/sprites/glyphs/mountain/mountain2_og.png",
-            "Assets/sprites/glyphs/mountain/mountain3_og.png",
-        ],
-        size=48,
-        spacing=26.8,
-        margin=6.0,
-        knockout=True,
-        knockout_fill="span",
-        # Barely cool, barely off-white: snow has to be brighter than the
-        # parchment or the cap goes back to reading as bare paper, but pure
-        # white on a warm page reads as a cut-out hole rather than as snow.
-        knockout_colour=(244, 246, 250),
-        # ... and not all the same white. One flat tone across every cap makes
-        # the field read as a single cut-out shape with ink drawn on it; a few
-        # tones let individual peaks separate from their neighbours. Kept to a
-        # luminance offset rather than a hue shift, because snow varies in how
-        # bright it is, not in what colour it is.
-        knockout_variants=5,
-        knockout_spread=22,
-    ),
-    Biome.MOUNTAIN: GlyphStyle(
-        paths=[
-            "Assets/sprites/glyphs/mountain/mountain1_og.png",
-            "Assets/sprites/glyphs/mountain/mountain2_og.png",
-            "Assets/sprites/glyphs/mountain/mountain3_og.png",
-        ],
-        size=48,
-        spacing=30.8,
-    ),
-}
-
-# Brush black. Pure black reads harsh on parchment, same reasoning as Board.INK
-# (which is the same colour, minus the alpha).
-INK: tuple[int, int, int, int] = (30, 26, 22, 255)
-
-
-@dataclass
-class ContourStyle:
-    """How one biome's outline is inked into the glyph map. `thickness` is in
-    RENDER pixels, like GlyphStyle's numbers, so a coastline stays the same
-    weight on screen however far the terrain is stretched.
-
-    `align` decides which side of the boundary the line sits on -- "outer"
-    draws it on the land side of a water body (the classic shoreline), "inner"
-    keeps it within the region itself. See Terrain.contour."""
-    colour: tuple[int, int, int, int] = INK
-    thickness: float = 2.0      # render px
-    align: str = "outer"
-
-
-# Biomes whose region outline gets inked into the GLYPHMAP, drawn UNDER the
-# glyphs. Same shape as BIOME_GLYPHS: only the biomes present as keys get a
-# line, so adding a mountain-range outline later is one entry, not a code path.
-BIOME_CONTOURS: dict[Biome, ContourStyle] = {
-    # The coastline. SEASIDE is the one biome gated purely on being below sea
-    # level, so its outline IS the waterline.
-    Biome.SEASIDE: ContourStyle(colour=INK, thickness=2.0, align="outer"),
-    # SNOW deliberately has NO entry here yet, and it's worth writing down why
-    # so nobody adds the obvious one again. A snowcap draws no glyphs and no
-    # wash, so it's bare paper, which surrounded by dense mountain glyphs reads
-    # as a hole punched in the range. Outlining it does not fix that: on this
-    # map an outlined blank region already MEANS water (see SEASIDE above), so
-    # a snowline turns an ambiguous gap into a confident lie -- a lake sitting
-    # on top of a mountain. What separates the two has to be inside the region,
-    # not around it: snow is lighter than the paper, water is not.
-}
-
-
-@dataclass
-class HatchStyle:
-    """Parallel hatching filling a biome's region -- the shading half of the
-    ink layer, where BIOME_CONTOURS is the outline half.
-
-    `line_spacing` and `thickness` are in RENDER pixels, like every other
-    on-screen measurement in this file, so the shading keeps its weight when
-    the terrain stretches. Note the defaults on Terrain.hatch itself (4 and
-    1.2) were tuned back when masks were data-resolution; at render size those
-    same numbers give a hatch four times finer than intended, hence the
-    coarser values here.
-
-    `wobble_amp` > 0 gives the lines a hand-drawn waver, but it costs about
-    five seconds at 1800x1024 -- Terrain.hatch drives it through np.vectorize
-    over pnoise2, i.e. one Python call per pixel. Leave it at 0 unless you're
-    willing to pay that at every render."""
-    colour: tuple[int, int, int, int] | p.Color
-    angle: float = 45.0
-    line_spacing: float = 14.0   # render px
-    thickness: float = 1.6       # render px
-    wobble_amp: float = 0.0
-
-
-# Biomes whose region gets hatched into the GLYPHMAP. Drawn UNDER the contours
-# (so an outline reads as the edge of its own shading) and under the glyphs.
-# Empty: water is drawn as open paper with sparse wave glyphs instead (see
-# BIOME_GLYPHS[Biome.SEASIDE]). Kept because the machinery is wired up and the
-# next biome that wants shading is one entry away -- e.g.
-#   Biome.SEASIDE: HatchStyle(colour=BIOME_TINTS[Biome.SEASIDE], angle=45.0),
-BIOME_HATCHES: dict[Biome, HatchStyle] = {}
-
-
-@dataclass
-class HazeStyle:
-    """Faint uneven tone laid through a biome's region, UNDER everything else.
-
-    Its job is to stop a field of glyphs reading as a scatter of separate
-    stamps: bare parchment between the peaks is what makes a range look like
-    loose stamps rather than one landform, and a little tone in those gaps
-    binds them. It draws nothing itself -- see Models/Haze.py for the field.
-
-    Only the colour and the strength are per-biome. The FIELD is built once and
-    masked per biome (see _build_glyph_map), so haze runs continuously across
-    the MOUNTAIN/SNOW border instead of two independent patches meeting at a
-    seam down the snowline -- which is the whole point, since those two biomes
-    are one mountain.
-
-    Keep the colours DARKER than the parchment. Lighter reads as a wash laid
-    over the paper; darker reads as air and shadow between the peaks, which is
-    what's wanted, and it stays out of the way of the snowcaps' pale glyphs.
-    """
-    colour: tuple[int, int, int, int]
-    strength: float = 1.0       # scales the alpha; 0 is off
-
-
-# Shared parameters for the one haze field. Cells are the grid it's BAKED at,
-# not pixels -- it's resampled to render size, so this is about how coarse the
-# haze is, not how sharp (see Models/Haze.py).
-HAZE_CELLS: tuple[int, int] = (120, 200)
-HAZE_COVERAGE: float = 0.10
-HAZE_VARIATION: float = 0.45
-# Render px of blur on the region mask. The haze field is soft but the biome
-# mask is not, so without this the haze stops dead on the classification
-# boundary -- a smudge with a cut edge, which is worse than no smudge. Blurring
-# also lets it overhang the region slightly, which is right: the air around a
-# mountain doesn't end where the rock does.
-HAZE_EDGE_SOFTNESS: float = 9.0
-# ... and the gain that undoes what the blur costs the INTERIOR. A blur this
-# wide doesn't only soften the border: over a fragmented region -- which is
-# what a mountain range is, arms and outliers rather than a disc -- it pulls
-# the middle down as well, because most of the region is within a sigma of
-# some edge. Measured, that left the haze averaging 7% opacity, i.e. present
-# but invisible. Multiplying back up and clipping restores solid interiors
-# while keeping the soft falloff, since only the edge is below 1 after the
-# gain.
-HAZE_EDGE_GAIN: float = 2.0
-
-# Biomes that get hazed. Mountains and their snowcaps, because they're the
-# regions drawn as dense glyph fields with paper showing through -- forests are
-# dense enough to close their own gaps.
-BIOME_HAZE: dict[Biome, HazeStyle] = {
-    Biome.MOUNTAIN: HazeStyle(colour=(118, 108, 96, 215)),
-    # Cooler and a touch stronger: the cap's glyphs are knocked out to near
-    # white, so they need more contrast behind them than the dark peaks do.
-    Biome.SNOW: HazeStyle(colour=(122, 128, 142, 220), strength=1.2),
-}
-
-
-@dataclass
-class FieldStyle:
-    """Farmland: a biome's region cut into Voronoi parcels, each one outlined
-    and (some of them) hatched, the way cultivated land is drawn on an estate
-    map. The shading counterpart to HatchStyle, except the hatching is per
-    PARCEL rather than per biome -- neighbouring fields run their furrows in
-    different directions, which is most of what makes the pattern read as
-    farmland rather than as texture.
-
-    Every measurement is in RENDER pixels, like GlyphStyle and ContourStyle, so
-    a field keeps its size on screen however far the terrain is stretched:
-
-    - `cell_size` -- the average parcel width. This is the one to reach for:
-      everything else is proportion.
-    - `jitter` -- how far a parcel's seed strays from its lattice position.
-      0 gives a graph-paper grid of identical squares, 1 lets a seed land
-      anywhere in its cell. The middle is what looks farmed: parcels visibly
-      hand-shaped but of comparable size, because nobody ploughs a sliver.
-    - `margin` -- parcels stay this far inside the biome's border, same knob as
-      GlyphStyle.margin, so the outermost furrow doesn't run into whatever
-      BIOME_CONTOURS inked on that boundary.
-    - `crop_fraction` -- share of parcels that get hatched at all. The rest are
-      left as bare paper (fallow), which is what stops the whole region turning
-      into one flat grey mass -- the contrast between worked and empty parcels
-      is the pattern.
-    - `angles` -- the directions a parcel's furrows may run, picked per parcel.
-      Keep them well apart; two angles a few degrees off each other read as one
-      badly drawn field rather than two neighbouring ones.
-    - `min_coverage` -- a parcel is dropped unless this fraction of a full
-      cell's worth of it lands inside the region. Without it, every stray
-      pocket of the biome catches a corner or a vertex of some parcel and inks
-      a few disconnected line fragments, which read as scratches on the paper
-      rather than as fields. Nobody farms a plot that size either.
-    """
-    cell_size: float = 64.0          # render px, average parcel width
-    jitter: float = 0.6              # 0 = lattice, 1 = anywhere in its cell
-    min_coverage: float = 0.35       # of a full cell's area, else dropped
-    edge_colour: tuple[int, int, int, int] = (*INK[:3], 190)
-    edge_thickness: float = 1.4      # render px
-    margin: float = 14.0             # render px, distance from the biome's border
-    crop_fraction: float = 0.55      # share of parcels that are hatched
-    hatch_colour: tuple[int, int, int, int] | p.Color = (108, 96, 68, 120)
-    hatch_spacing: float = 7.0       # render px
-    hatch_thickness: float = 1.1     # render px
-    angles: tuple[float, ...] = (18.0, 63.0, 108.0, 153.0)
-
-
-# Biomes whose region gets cut into farmland parcels, drawn UNDER the contours
-# and the glyphs. Same shape as BIOME_GLYPHS/BIOME_HATCHES: a biome with no
-# entry here simply isn't cultivated.
-BIOME_FIELDS: dict[Biome, FieldStyle] = {
-    # PLAIN is the temperate/dry-to-normal cell of the Whittaker table -- the
-    # one biome that is neither underwater, at altitude, nor jungle, which is
-    # exactly where people farm.
-    Biome.PLAIN: FieldStyle(),
-}
-
-
-@dataclass
-class NoiseParams:
-    size:           tuple[int, int]  # (width, height) -- x,y order, like a pygame Surface/Rect size
-    scale:          float = 200.0
-    octaves:        int = 4
-    persistence:    float = 0.5
-    lacunarity:     float = 1.8
-    seed:           int = 0
-
-@dataclass
-class SunParams:
-    elevation:  float = 45.0
-    azimuth:    float = 315.0
-    solar_max_temp_gain: float = 8.0
-    shadow_max_temp_loss: float = 3.0
-    # how fast the shadow-casting ray falls per column: bigger -> shorter shadows, smaller -> longer shadows.
-    # 0.005 is a good default found by eye in scratch/temp_shadow_debug.py; None -> compute_shadows picks 1/width instead.
-    shadow_falloff: float | None = 0.005
-    # extra cooling for cells shadowed most of the DAY (see shadow_accumulation_map), separate from
-    # shadow_max_temp_loss which only reacts to the current instant's shadow. Models valleys hemmed in
-    # by mountains staying cold even when the current moment's sun happens to reach them directly.
-    accumulated_shadow_temp_loss: float = 6.0
 
 class Terrain:
     """Two resolutions, kept strictly apart.
@@ -514,7 +82,16 @@ class Terrain:
     terrain can never shift around underneath the board.
     """
 
-    def __init__(self, height_noise_params: NoiseParams, moisture_noise_params: NoiseParams, sun_params: SunParams, bounding_rect: p.Rect, max_height: float = 4000.0, sea_level_temperature: float = 20.0, min_temperature: float | None = None):
+    def __init__(
+        self,
+        height_noise_params: NoiseParams,
+        moisture_noise_params: NoiseParams,
+        sun_params: SunParams,
+        bounding_rect: p.Rect,
+        max_height: float = 4000.0,
+        sea_level_temperature: float = 20.0,
+        min_temperature: float | None = None,
+    ):
         self.max_height = max_height
         self.sea_level_temperature = sea_level_temperature
         # The coldest point on the map, in degrees. Left to chance so no two
@@ -526,10 +103,13 @@ class Terrain:
         # could not A/B a generation change against a fixed map. Pass an
         # explicit value to pin it (or to sweep climate independently of shape).
         self.min_temperature = (
-            int(np.random.default_rng(
-                (height_noise_params.seed, moisture_noise_params.seed)
-            ).integers(-40, -20))
-            if min_temperature is None else min_temperature
+            int(
+                np.random.default_rng(
+                    (height_noise_params.seed, moisture_noise_params.seed)
+                ).integers(-40, -20)
+            )
+            if min_temperature is None
+            else min_temperature
         )
         self.noise_params = height_noise_params
         self.moisture_params = moisture_noise_params
@@ -544,7 +124,7 @@ class Terrain:
         # None = not baked yet. See surface_for.
         self.surfaces: dict[TerrainMode, p.Surface | None] = {}
         self._invalidate_render()
-        self.surface_for(self.mode)   # only the mode we start on
+        self.surface_for(self.mode)  # only the mode we start on
 
     def _build_fields(self):
         """Everything that IS the terrain, in data space (see the class
@@ -552,10 +132,14 @@ class Terrain:
         how big the terrain is drawn, so `resize` never re-runs any of it."""
         self.height_map = Terrain.generate_height_map(self.noise_params)
         self.height_map_grad = np.gradient(self.height_map)
-        self.shadow_map = Terrain.compute_shadows(self.height_map, self.sun_params, self.sun_params.shadow_falloff)
-        self.shadow_accumulation_map = Terrain.compute_shadow_accumulation(self.height_map, self.sun_params)
+        self.shadow_map = Terrain.compute_shadows(
+            self.height_map, self.sun_params, self.sun_params.shadow_falloff
+        )
+        self.shadow_accumulation_map = Terrain.compute_shadow_accumulation(
+            self.height_map, self.sun_params
+        )
         self.moisture_map = Terrain.generate_height_map(self.moisture_params)
-        self._build_temp_map()   # must run first: _build_biome_map's Whittaker lookup needs temp_map_normalized
+        self._build_temp_map()  # must run first: _build_biome_map's Whittaker lookup needs temp_map_normalized
         self._build_biome_map()
         self.colour_map = Terrain.colour_from_biomes(self.biome_mat)
         # Glyph positions can't be sampled yet: their spacing is specified in
@@ -569,7 +153,7 @@ class Terrain:
         mat = np.zeros_like(matrix)
         mat[matrix >= edge] = 1.0
         return mat
-    
+
     @staticmethod
     def smoothstep(lo: float, hi: float, matrix: np.ndarray) -> np.ndarray:
         """Smooth 0->1 ramp: 0 below `lo`, 1 above `hi`, an S-curve between. The
@@ -589,7 +173,9 @@ class Terrain:
         return mat
 
     @staticmethod
-    def border_fade(shape: tuple[int, int], inner: float = 0.75, outer: float = 1.0, n: float = 8.0) -> np.ndarray:
+    def border_fade(
+        shape: tuple[int, int], inner: float = 0.75, outer: float = 1.0, n: float = 8.0
+    ) -> np.ndarray:
         """(H, W) fade mask in [0,1]: 1.0 through the interior, smoothstepped
         down to 0.0 at the border. Distance from centre is the L^n (Minkowski)
         norm, normalized so 1.0 lands exactly on the nearest edge in each axis
@@ -606,11 +192,11 @@ class Terrain:
         -- worth it because this runs over the whole render-size canvas."""
         rows, cols = shape
         cy, cx = (rows - 1) / 2.0, (cols - 1) / 2.0
-        ny_n = (np.abs(np.arange(rows) - cy) / cy) ** n     # (rows,)
-        nx_n = (np.abs(np.arange(cols) - cx) / cx) ** n     # (cols,)
+        ny_n = (np.abs(np.arange(rows) - cy) / cy) ** n  # (rows,)
+        nx_n = (np.abs(np.arange(cols) - cx) / cx) ** n  # (cols,)
         d = (ny_n[:, None] + nx_n[None, :]) ** (1.0 / n)
         return 1.0 - Terrain.smoothstep(inner, outer, d)
-    
+
     def get_biome_at_coords(self, row: int, col: int, grid_size: int) -> Biome:
         """Overlap the Board.py grid onto the terrain canvas: map a grid cell
         (row, col in 0..grid_size-1) to the corresponding canvas pixel and return
@@ -623,7 +209,9 @@ class Terrain:
         return Biome(self.biome_mat[x, y])
 
     @staticmethod
-    def _level_indices(vals: np.ndarray, thresholds: dict[tuple[float, float], Enum]) -> np.ndarray:
+    def _level_indices(
+        vals: np.ndarray, thresholds: dict[tuple[float, float], Enum]
+    ) -> np.ndarray:
         """Which band of `thresholds` each value falls in, as an index into the
         dict's own order. Bands are contiguous and ascending, so "the last band
         whose lower bound the value clears" is just a searchsorted against the
@@ -632,7 +220,9 @@ class Terrain:
         return np.searchsorted(lower_bounds[1:], np.clip(vals, 0.0, 1.0), side="right")
 
     @staticmethod
-    def classify_biomes(height: np.ndarray, moisture: np.ndarray, temperature: np.ndarray) -> np.ndarray:
+    def classify_biomes(
+        height: np.ndarray, moisture: np.ndarray, temperature: np.ndarray
+    ) -> np.ndarray:
         """height/moisture are height_map/moisture_map values (already
         [0,1]-normalized); temperature must be Terrain.normalize(temp_map) --
         temp_map itself is in real degrees and its range shifts
@@ -653,22 +243,38 @@ class Terrain:
         moisture_bands = Terrain._level_indices(moisture, MOISTURE_THRESHOLDS)  # type: ignore
         biomes = _WHITTAKER_LUT[temperature_bands, moisture_bands]
 
-        # Height overrides, applied after the climate lookup. SEASIDE (low) and
+        # Height overrides, applied after the climate lookup. LAKE (low) and
         # SNOW/MOUNTAIN (high) can't both fire on one cell, so order between
         # those groups doesn't matter; SNOW must win over MOUNTAIN though, as
         # its band sits inside the "at least mountain height" range.
-        biomes = np.where(h >= BIOME_THRESHOLDS_REV[Biome.MOUNTAIN][0], np.uint8(Biome.MOUNTAIN.value), biomes)
-        biomes = np.where(h >= BIOME_THRESHOLDS_REV[Biome.SNOW][0], np.uint8(Biome.SNOW.value), biomes)
-        biomes = np.where(h < BIOME_THRESHOLDS_REV[Biome.SEASIDE][1], np.uint8(Biome.SEASIDE.value), biomes)
+        biomes = np.where(
+            h >= BIOME_THRESHOLDS_REV[Biome.MOUNTAIN][0],
+            np.uint8(Biome.MOUNTAIN.value),
+            biomes,
+        )
+        biomes = np.where(
+            h >= BIOME_THRESHOLDS_REV[Biome.SNOW][0], np.uint8(Biome.SNOW.value), biomes
+        )
+        biomes = np.where(
+            h < BIOME_THRESHOLDS_REV[Biome.LAKE][1],
+            np.uint8(Biome.LAKE.value),
+            biomes,
+        )
         return biomes.astype(np.uint8)
 
-    def get_biome_from_val(self, height_val: float, moisture_val: float, temperature_val: float) -> Biome:
+    def get_biome_from_val(
+        self, height_val: float, moisture_val: float, temperature_val: float
+    ) -> Biome:
         """Single-cell classification -- a thin wrapper over classify_biomes so
         the scalar and whole-map paths can't disagree about where a boundary
         sits. See classify_biomes for what the three values must be."""
-        return Biome(int(Terrain.classify_biomes(
-            np.float64(height_val), np.float64(moisture_val), np.float64(temperature_val) # type: ignore
-        )))
+        return Biome(
+            int(
+                Terrain.classify_biomes(
+                    np.float64(height_val), np.float64(moisture_val), np.float64(temperature_val)  # type: ignore
+                )
+            )
+        )
 
     @staticmethod
     def generate_height_map(noise_params: NoiseParams) -> np.ndarray:
@@ -691,37 +297,46 @@ class Terrain:
                 )
         heightmap = Terrain.normalize(heightmap)
         return heightmap
-    
+
     def _build_temp_map(self):
         if self.height_map is None:
             raise NotImplementedError("trying to build temp map over None height map")
-        sea_level = BIOME_THRESHOLDS_REV[Biome.SEASIDE][1]
+        sea_level = BIOME_THRESHOLDS_REV[Biome.LAKE][1]
 
-        self.temp_map = np.interp(self.height_map, [sea_level, 1.0], [self.sea_level_temperature, self.min_temperature])
+        self.temp_map = np.interp(
+            self.height_map,
+            [sea_level, 1.0],
+            [self.sea_level_temperature, self.min_temperature],
+        )
         # self.temp_map[self.temp_map > self.sea_level_temperature] = self.sea_level_temperature
         # last line commented out because numpy automatically clamps output between sea level temperature and min temperature
 
         # now adjust based on illumination: if sun ray is hitting perpendicular then hotter
         not_in_shadow = 1 - self.shadow_map
-        gy, gx = self.height_map_grad            # each is (H, W), per-cell ∂h/∂y and ∂h/∂x
-        theta, phi = np.radians(self.sun_params.elevation), np.radians(self.sun_params.azimuth)
+        gy, gx = self.height_map_grad  # each is (H, W), per-cell ∂h/∂y and ∂h/∂x
+        theta, phi = np.radians(self.sun_params.elevation), np.radians(
+            self.sun_params.azimuth
+        )
         Lx = np.cos(theta) * np.cos(phi)
         Ly = np.cos(theta) * np.sin(phi)
         Lz = np.sin(theta)
 
-        NdotL = (-gx*Lx - gy*Ly + Lz) / np.sqrt(gx**2 + gy**2 + 1.0)
+        NdotL = (-gx * Lx - gy * Ly + Lz) / np.sqrt(gx**2 + gy**2 + 1.0)
         illum = np.clip(NdotL, 0.0, None)
 
         self.temp_map += self.sun_params.solar_max_temp_gain * illum * not_in_shadow
         self.temp_map -= self.sun_params.shadow_max_temp_loss * self.shadow_map
         # persistent "valley coldness": cells shadowed most of the day stay cold even at
         # moments (like right now) when the sun happens to be hitting them directly.
-        self.temp_map -= self.sun_params.accumulated_shadow_temp_loss * self.shadow_accumulation_map
+        self.temp_map -= (
+            self.sun_params.accumulated_shadow_temp_loss * self.shadow_accumulation_map
+        )
 
         # shadow_map is a hard 0/1 mask, so every shadow boundary was a sudden
         # step of shadow_max_temp_loss degrees -- a small blur turns that into a
         # gradient instead, which also reads more physically (heat diffuses).
         from scipy.ndimage import gaussian_filter
+
         self.temp_map = gaussian_filter(self.temp_map, sigma=1.5)
 
         # cached for the Whittaker lookup (get_biome_from_val) -- temp_map is in real
@@ -755,7 +370,9 @@ class Terrain:
         return colours
 
     @staticmethod
-    def _resample(field: np.ndarray, out_size: tuple[int, int], order: int = 1) -> np.ndarray:
+    def _resample(
+        field: np.ndarray, out_size: tuple[int, int], order: int = 1
+    ) -> np.ndarray:
         """Sample a data-space (H, W) field at `out_size` = (width, height)
         RENDER pixels. This is the one place where data resolution becomes
         render resolution.
@@ -771,6 +388,7 @@ class Terrain:
         upscale. Output pixel CENTRES are mapped back to input pixel centres
         (hence the -0.5 shifts), so the field doesn't drift half a cell."""
         from scipy.ndimage import map_coordinates
+
         rows, cols = field.shape
         out_w, out_h = out_size
         if (cols, rows) == (out_w, out_h):
@@ -780,7 +398,9 @@ class Terrain:
         yy, xx = np.meshgrid(y, x, indexing="ij")
         # mode='nearest' clamps the half-pixel overhang at the borders instead
         # of fading it toward a fill value.
-        return map_coordinates(field.astype(np.float64), [yy, xx], order=order, mode="nearest")
+        return map_coordinates(
+            field.astype(np.float64), [yy, xx], order=order, mode="nearest"
+        )
 
     def _invalidate_render(self):
         """Drop everything that was baked for the current render size. Called
@@ -814,7 +434,9 @@ class Terrain:
             height_r = self._render_field(self.height_map, order=3)
             moisture_r = self._render_field(self.moisture_map, order=3)
             temp_r = self._render_field(self.temp_map_normalized, order=3)
-            self._render_biomes_cache = Terrain.classify_biomes(height_r, moisture_r, temp_r)
+            self._render_biomes_cache = Terrain.classify_biomes(
+                height_r, moisture_r, temp_r
+            )
         return self._render_biomes_cache
 
     def _render_map(self, mode: TerrainMode) -> np.ndarray:
@@ -837,13 +459,18 @@ class Terrain:
         if mode is TerrainMode.BIOMESMAP or mode is TerrainMode.COLOURMAP:
             return Terrain.colour_from_biomes(self._render_biomes())
         if mode is TerrainMode.HEIGHTMAP:
-            return Terrain.apply_palette(self._render_field(self.height_map, order=3),
-                                         Terrain.ELEVATION_PALETTE)
+            return Terrain.apply_palette(
+                self._render_field(self.height_map, order=3), Terrain.ELEVATION_PALETTE
+            )
         if mode is TerrainMode.TEMPMAP:
-            return Terrain.apply_palette(self._render_field(self.temp_map_normalized, order=3),
-                                         Terrain.TEMPERATURE_PALETTE)
+            return Terrain.apply_palette(
+                self._render_field(self.temp_map_normalized, order=3),
+                Terrain.TEMPERATURE_PALETTE,
+            )
         if mode is TerrainMode.SHADOWMAP:
-            return Terrain._grey_to_rgba(self._render_field(self.shadow_map.astype(np.float64), order=1))
+            return Terrain._grey_to_rgba(
+                self._render_field(self.shadow_map.astype(np.float64), order=1)
+            )
         raise ValueError(f"no renderer for terrain mode {mode!r}")
 
     def _bake_surface(self, rgba: np.ndarray) -> p.Surface:
@@ -906,7 +533,9 @@ class Terrain:
         return np.concatenate([rgb, alpha], axis=2)
 
     @staticmethod
-    def apply_palette(mat: np.ndarray, palette: list[tuple[float, tuple[int, int, int]]]) -> np.ndarray:
+    def apply_palette(
+        mat: np.ndarray, palette: list[tuple[float, tuple[int, int, int]]]
+    ) -> np.ndarray:
         """Map a [0,1]-normalized matrix through a piecewise-linear colour ramp.
         `palette` is a list of (stop, rgb) pairs, stops ascending in [0,1] and
         covering the full range (e.g. the first stop should be 0.0, the last
@@ -927,29 +556,33 @@ class Terrain:
     # Classic topographic ramp: deep blue (sea) -> cyan/green (shallows/coast)
     # -> yellow-green (lowland) -> brown (highland) -> red (peaks).
     ELEVATION_PALETTE: list[tuple[float, tuple[int, int, int]]] = [
-        (0.00, (18, 42, 110)),    # deep water
-        (0.10, (46, 100, 176)),   # shallow water
+        (0.00, (18, 42, 110)),  # deep water
+        (0.10, (46, 100, 176)),  # shallow water
         (0.12, (210, 200, 150)),  # shoreline
-        (0.35, (96, 156, 72)),    # lowland green
-        (0.65, (176, 148, 84)),   # highland brown
-        (0.85, (150, 90, 70)),    # mountain red-brown
-        (1.00, (214, 60, 50)),    # peak red
+        (0.35, (96, 156, 72)),  # lowland green
+        (0.65, (176, 148, 84)),  # highland brown
+        (0.85, (150, 90, 70)),  # mountain red-brown
+        (1.00, (214, 60, 50)),  # peak red
     ]
 
     # Classic thermal ramp: cold blue -> temperate green -> hot red. Meant for
     # temp_map (which is NOT [0,1]-normalized, unlike height_map) -- normalize
     # it first, e.g. via `Terrain.normalize(t.temp_map)`.
     TEMPERATURE_PALETTE: list[tuple[float, tuple[int, int, int]]] = [
-        (0.00, (30, 60, 170)),    # coldest (mountaintop)
-        (0.35, (90, 160, 200)),   # cool
+        (0.00, (30, 60, 170)),  # coldest (mountaintop)
+        (0.35, (90, 160, 200)),  # cool
         (0.55, (150, 200, 120)),  # temperate
-        (0.75, (230, 190, 70)),   # warm
-        (1.00, (210, 50, 40)),    # hottest (sea level)
+        (0.75, (230, 190, 70)),  # warm
+        (1.00, (210, 50, 40)),  # hottest (sea level)
     ]
 
     @staticmethod
-    def to_pygame_surf(mat: np.ndarray, surf: p.Surface,
-                        palette: list[tuple[float, tuple[int, int, int]]] | None = None, size: tuple | None = None) -> None:
+    def to_pygame_surf(
+        mat: np.ndarray,
+        surf: p.Surface,
+        palette: list[tuple[float, tuple[int, int, int]]] | None = None,
+        size: tuple | None = None,
+    ) -> None:
         """Blit a matrix onto `surf`. Two shapes are accepted:
         - (H, W): a [0,1]-normalized scalar matrix, with no colour baked in
           yet. With no palette this is plain greyscale; pass a palette (see
@@ -961,7 +594,9 @@ class Terrain:
         Important: the surface's (width, height) must match the matrix's
         (cols, rows) -- pygame sizes are (W, H), matrices here are (H, W, ...)."""
         if surf.get_size() != (mat.shape[1], mat.shape[0]):
-            raise ValueError(f"Error: trying to blit_array a matrix of shape {mat.shape} onto a surface of size {surf.get_size()}")
+            raise ValueError(
+                f"Error: trying to blit_array a matrix of shape {mat.shape} onto a surface of size {surf.get_size()}"
+            )
         if mat.ndim == 2 and palette is not None:
             mat = Terrain.apply_palette(mat, palette)
         elif mat.ndim == 2:
@@ -974,34 +609,44 @@ class Terrain:
         p.surfarray.pixels_alpha(surf)[:, :] = np.transpose(mat[:, :, 3], (1, 0))
 
     @staticmethod
-    def build_inked_mat(mat: np.ndarray, ink_colour: tuple[int, int, int, int], ink_width: float = 0.02) -> np.ndarray:
+    def build_inked_mat(
+        mat: np.ndarray, ink_colour: tuple[int, int, int, int], ink_width: float = 0.02
+    ) -> np.ndarray:
         """Build coloured matrix with INK colour between areas"""
         out = np.zeros((mat.shape[0], mat.shape[1], 4), dtype=np.uint8)
         rows, cols = mat.shape
         for i in range(rows):
             for j in range(cols):
                 for interval, biome in BIOME_THRESHOLDS.items():
-                    val = mat[i,j]
-                    if interval[1] - ink_width * .5 <= val <= interval[1] + ink_width * .5:
+                    val = mat[i, j]
+                    if (
+                        interval[1] - ink_width * 0.5
+                        <= val
+                        <= interval[1] + ink_width * 0.5
+                    ):
                         # then it's the contour
-                        out[i,j] = ink_colour
+                        out[i, j] = ink_colour
                         break
                     elif interval[0] <= val <= interval[1]:
-                        out[i,j] = BIOME_TINTS[biome]
+                        out[i, j] = BIOME_TINTS[biome]
                         break
         return out
-    
+
     @staticmethod
     def compute_glyph_points_mat(mask: np.ndarray, spacing: int = 5) -> np.ndarray:
         """This function takes in a mask representing a set of points, then gives back a mask representing where to spawn the glyphs inside that area (out_mask is all 0 except 1 where you gotta spawn them, use np.argwhere(out_mask) to get coordinates)"""
         mask2 = np.zeros_like(mask)
         mask2[::spacing, ::spacing] = 1
         return mask * mask2
-    
+
     @staticmethod
-    def compute_glyph_points_mat_unif(mask: np.ndarray, spacing: float = 10.0,
-                                       how_many: int | None = 20,
-                                       return_coords=True, rng=None):
+    def compute_glyph_points_mat_unif(
+        mask: np.ndarray,
+        spacing: float = 10.0,
+        how_many: int | None = 20,
+        return_coords=True,
+        rng=None,
+    ):
         """Blue-noise-ish sample of points inside `mask`, each at least
         `spacing` px from every other accepted point (a random point is picked,
         accepted, then a disk of radius `spacing` around it is stamped out of a
@@ -1039,7 +684,7 @@ class Terrain:
 
         # precompute disk offsets
         r = int(np.ceil(spacing))
-        di, dj = np.mgrid[-r:r+1, -r:r+1]
+        di, dj = np.mgrid[-r : r + 1, -r : r + 1]
         disk = (di**2 + dj**2) < spacing**2
         di, dj = di[disk], dj[disk]
 
@@ -1050,7 +695,7 @@ class Terrain:
                 break
             i, j = candidates[idx]
             if not free[i, j]:
-                continue        # inside an earlier point's exclusion disk
+                continue  # inside an earlier point's exclusion disk
             accepted.append(candidates[idx])
 
             # stamp out the disk
@@ -1067,7 +712,9 @@ class Terrain:
         return mask2
 
     @staticmethod
-    def get_biome_mask(biome_mat: np.ndarray, biome: Biome, margin_px: float = 0.0) -> np.ndarray:
+    def get_biome_mask(
+        biome_mat: np.ndarray, biome: Biome, margin_px: float = 0.0
+    ) -> np.ndarray:
         """{0,1} mask of every cell classified as `biome` in biome_mat (see
         Terrain._build_biome_mat -- the cached height+moisture+temperature
         Whittaker classification, NOT a height-only approximation, so this
@@ -1084,7 +731,7 @@ class Terrain:
         inset is then isotropic (erosion's default 3x3 cross gives a diamond,
         so a margin of N would only be N/sqrt(2) diagonally) and `margin_px`
         can be fractional."""
-        mask = (biome_mat == biome.value)
+        mask = biome_mat == biome.value
         if margin_px > 0:
             # EDT = distance to the nearest cell NOT in this biome, so this
             # reads literally as "at least margin_px in from the border".
@@ -1092,7 +739,9 @@ class Terrain:
         return mask.astype(np.float64)
 
     @staticmethod
-    def to_render_coords(coords, data_shape: tuple[int, int], out_size: tuple[int, int]):
+    def to_render_coords(
+        coords, data_shape: tuple[int, int], out_size: tuple[int, int]
+    ):
         """Data-space (row, col) points -> render-space (y, x) points.
 
         Cell CENTRES map to the centre of the render pixels that cell covers,
@@ -1104,11 +753,21 @@ class Terrain:
         rows, cols = data_shape
         out_w, out_h = out_size
         scale_y, scale_x = out_h / rows, out_w / cols
-        return [((row + 0.5) * scale_y - 0.5, (col + 0.5) * scale_x - 0.5) for row, col in coords]
+        return [
+            ((row + 0.5) * scale_y - 0.5, (col + 0.5) * scale_x - 0.5)
+            for row, col in coords
+        ]
 
-    def get_point_cloud_coords(self, biome: Biome, spacing: float = 18.0, grid_like=True,
-                                how_many: int | None = 20, margin_px: float = 0.0,
-                                out_size: tuple[int, int] | None = None, rng=None):
+    def get_point_cloud_coords(
+        self,
+        biome: Biome,
+        spacing: float = 18.0,
+        grid_like=True,
+        how_many: int | None = 20,
+        margin_px: float = 0.0,
+        out_size: tuple[int, int] | None = None,
+        rng=None,
+    ):
         """Coordinates to spawn glyphs at, in PAINT ORDER (ascending row/y).
 
         Sampling happens on the data grid, so `spacing` and `margin_px` are in
@@ -1126,19 +785,29 @@ class Terrain:
             # True (=1) into `how_many`, so only ONE point ever comes back
             # regardless of the requested how_many.
             coords = Terrain.compute_glyph_points_mat_unif(
-                biome_mask, spacing=spacing, how_many=how_many, return_coords=True, rng=rng)
+                biome_mask,
+                spacing=spacing,
+                how_many=how_many,
+                return_coords=True,
+                rng=rng,
+            )
         else:
             # The grid sampler strides the array, so this branch alone needs a
             # whole number -- the blue-noise one above takes a real spacing.
-            glyph_mask = Terrain.compute_glyph_points_mat(biome_mask, spacing=max(1, int(spacing)))
+            glyph_mask = Terrain.compute_glyph_points_mat(
+                biome_mask, spacing=max(1, int(spacing))
+            )
             coords = np.argwhere(glyph_mask)
         if out_size is not None:
             coords = Terrain.to_render_coords(coords, self.biome_mat.shape, out_size)
         return sorted(coords, key=lambda c: c[0])
 
     @staticmethod
-    def _blit_ink(surf: p.Surface, coverage: np.ndarray,
-                  colour: tuple[int, int, int, int] | p.Color) -> None:
+    def _blit_ink(
+        surf: p.Surface,
+        coverage: np.ndarray,
+        colour: tuple[int, int, int, int] | p.Color,
+    ) -> None:
         """Composite a flat `colour` onto `surf` through a coverage mask -- a
         bool matrix, or float in [0,1] for an antialiased edge (what
         Terrain.contour(soft=True) returns). Drawn in place, like
@@ -1147,7 +816,9 @@ class Terrain:
         Goes through a temporary layer + blit rather than writing the colour
         straight into `surf`'s pixels, so partial coverage BLENDS with whatever
         is already on the canvas instead of replacing it."""
-        alpha = (np.clip(coverage.astype(np.float64), 0.0, 1.0) * colour[3]).astype(np.uint8)
+        alpha = (np.clip(coverage.astype(np.float64), 0.0, 1.0) * colour[3]).astype(
+            np.uint8
+        )
         if not alpha.any():
             return
         layer = p.Surface((coverage.shape[1], coverage.shape[0]), p.SRCALPHA)
@@ -1158,13 +829,20 @@ class Terrain:
         surf.blit(layer, (0, 0))
 
     @staticmethod
-    def _stamp_glyphs(surf: p.Surface, coords, glyph_paths: list[str], glyph_size: int, seed: int = 0,
-                       max_rotation: float = 5.0, scale_range: tuple[float, float] = (0.8, 1.2),
-                       knockout_glyphs: bool = False,
-                       knockout_background_color=(255, 255, 255),
-                       knockout_fill: str = "holes",
-                       knockout_variants: int = 1,
-                       knockout_spread: int = 0) -> None:
+    def _stamp_glyphs(
+        surf: p.Surface,
+        coords,
+        glyph_paths: list[str],
+        glyph_size: int,
+        seed: int = 0,
+        max_rotation: float = 5.0,
+        scale_range: tuple[float, float] = (0.8, 1.2),
+        knockout_glyphs: bool = False,
+        knockout_background_color=(255, 255, 255),
+        knockout_fill: str = "holes",
+        knockout_variants: int = 1,
+        knockout_spread: int = 0,
+    ) -> None:
         """Stamp a glyph sprite at each `coords` location directly onto `surf`
         (drawn in place, so callers compositing multiple biomes' glyphs onto
         one shared surface just call this once per biome). Glyphs are picked
@@ -1195,8 +873,14 @@ class Terrain:
                     # jittering channels independently drifts the hue, and
                     # snow that varies in colour rather than brightness reads
                     # as a printing fault.
-                    d = vrng.randint(-knockout_spread, knockout_spread) if knockout_spread else 0
-                    body = tuple(max(0, min(255, c + d)) for c in knockout_background_color[:3])
+                    d = (
+                        vrng.randint(-knockout_spread, knockout_spread)
+                        if knockout_spread
+                        else 0
+                    )
+                    body = tuple(
+                        max(0, min(255, c + d)) for c in knockout_background_color[:3]
+                    )
                     variants.append(knockout(g, body, fill=knockout_fill))
             glyphs = variants
         # Pre-scale to the LARGEST size any instance will be drawn at, then let
@@ -1215,10 +899,16 @@ class Terrain:
         # exactly what scaling both sides to glyph_size already did.
         largest = max(scale_range)
         target = round(glyph_size * largest)
-        glyphs = [p.transform.smoothscale(
-                      g, tuple(max(1, round(side * target / max(g.get_size())))
-                               for side in g.get_size()))
-                  for g in glyphs]
+        glyphs = [
+            p.transform.smoothscale(
+                g,
+                tuple(
+                    max(1, round(side * target / max(g.get_size())))
+                    for side in g.get_size()
+                ),
+            )
+            for g in glyphs
+        ]
 
         rng = pyrandom.Random(seed)
         for row, col in coords:
@@ -1232,7 +922,9 @@ class Terrain:
             surf.blit(g_t, g_t.get_rect(center=(round(col), round(row))))
 
     @staticmethod
-    def data_spacing_for(render_spacing: float, data_shape: tuple[int, int], out_size: tuple[int, int]) -> float:
+    def data_spacing_for(
+        render_spacing: float, data_shape: tuple[int, int], out_size: tuple[int, int]
+    ) -> float:
         """A minimum gap in render px -> the minimum gap in data px that
         guarantees it. Two points `d` data cells apart end up `d * scale_x`
         apart horizontally and `d * scale_y` vertically, so the axis that can
@@ -1246,7 +938,9 @@ class Terrain:
         return max(1.0, Terrain.to_data_px(render_spacing, data_shape, out_size))
 
     @staticmethod
-    def to_data_px(render_px: float, data_shape: tuple[int, int], out_size: tuple[int, int]) -> float:
+    def to_data_px(
+        render_px: float, data_shape: tuple[int, int], out_size: tuple[int, int]
+    ) -> float:
         """A render-space distance -> the same distance in data cells. The raw
         conversion behind data_spacing_for, without its floor -- a margin of 0
         has to stay 0."""
@@ -1268,16 +962,26 @@ class Terrain:
         is seeded off the terrain's own noise seed, so a given size always
         produces the same map back."""
         for biome, style in BIOME_GLYPHS.items():
-            spacing = Terrain.data_spacing_for(style.spacing, self.biome_mat.shape, out_size)
+            spacing = Terrain.data_spacing_for(
+                style.spacing, self.biome_mat.shape, out_size
+            )
             if self._glyph_spacing.get(biome) == spacing:
                 continue
             self.glyph_coords[biome] = self.get_point_cloud_coords(
-                biome, grid_like=False, how_many=None, spacing=spacing,
-                margin_px=Terrain.to_data_px(style.margin, self.biome_mat.shape, out_size),
-                rng=np.random.default_rng((self.noise_params.seed, biome.value)))
+                biome,
+                grid_like=False,
+                how_many=None,
+                spacing=spacing,
+                margin_px=Terrain.to_data_px(
+                    style.margin, self.biome_mat.shape, out_size
+                ),
+                rng=np.random.default_rng((self.noise_params.seed, biome.value)),
+            )
             self._glyph_spacing[biome] = spacing
 
-    def _build_glyph_map(self, out_size: tuple[int, int], biomes: np.ndarray) -> np.ndarray:
+    def _build_glyph_map(
+        self, out_size: tuple[int, int], biomes: np.ndarray
+    ) -> np.ndarray:
         """The map's ink layer: every biome in BIOME_CONTOURS outlined, every
         biome in BIOME_GLYPHS stamped, on a transparent canvas -- no colour_map
         wash underneath (see TerrainMode.COLOURMAP for that). Returns an
@@ -1299,15 +1003,31 @@ class Terrain:
         # field, masked per biome -- see BIOME_HAZE for why they share it.
         if BIOME_HAZE:
             from scipy.ndimage import gaussian_filter
-            haze = np.clip(Terrain._resample(
-                haze_field(HAZE_CELLS, seed=self.noise_params.seed,
-                           coverage=HAZE_COVERAGE, variation=HAZE_VARIATION),
-                out_size, order=3), 0.0, 1.0)
+
+            haze = np.clip(
+                Terrain._resample(
+                    haze_field(
+                        HAZE_CELLS,
+                        seed=self.noise_params.seed,
+                        coverage=HAZE_COVERAGE,
+                        variation=HAZE_VARIATION,
+                    ),
+                    out_size,
+                    order=3,
+                ),
+                0.0,
+                1.0,
+            )
             for biome, style in BIOME_HAZE.items():
                 region = np.clip(
-                    gaussian_filter((biomes == biome.value).astype(np.float64),
-                                    sigma=HAZE_EDGE_SOFTNESS) * HAZE_EDGE_GAIN,
-                    0.0, 1.0)
+                    gaussian_filter(
+                        (biomes == biome.value).astype(np.float64),
+                        sigma=HAZE_EDGE_SOFTNESS,
+                    )
+                    * HAZE_EDGE_GAIN,
+                    0.0,
+                    1.0,
+                )
                 Terrain._blit_ink(surf, haze * region * style.strength, style.colour)
 
         # Painter's order: farmland, then region shading, then the outlines
@@ -1323,39 +1043,60 @@ class Terrain:
             # clipped to (margin included) has to be the render-resolution one.
             region = Terrain.get_biome_mask(biomes, biome, margin_px=style.margin) > 0
             if region.any():
-                Terrain._build_field_layer(surf, region, style, seed=self.noise_params.seed)
+                Terrain._build_field_layer(
+                    surf, region, style, seed=self.noise_params.seed
+                )
         for biome, style in BIOME_HATCHES.items():
-            Terrain._blit_ink(surf, Terrain.hatch(biomes == biome.value,
-                                                  angle=style.angle,
-                                                  line_spacing=int(style.line_spacing),
-                                                  thickness=style.thickness,
-                                                  wobble_amp=style.wobble_amp),
-                              style.colour)
+            Terrain._blit_ink(
+                surf,
+                Terrain.hatch(
+                    biomes == biome.value,
+                    angle=style.angle,
+                    line_spacing=int(style.line_spacing),
+                    thickness=style.thickness,
+                    wobble_amp=style.wobble_amp,
+                ),
+                style.colour,
+            )
         for biome, style in BIOME_CONTOURS.items():
-            Terrain._blit_ink(surf, Terrain.contour(biomes == biome.value,
-                                                    thickness=style.thickness,
-                                                    align=style.align, soft=True),
-                              style.colour)
+            Terrain._blit_ink(
+                surf,
+                Terrain.contour(
+                    biomes == biome.value,
+                    thickness=style.thickness,
+                    align=style.align,
+                    soft=True,
+                    offset=style.offset,
+                ),
+                style.colour,
+            )
         for biome, style in BIOME_GLYPHS.items():
-            coords = Terrain.to_render_coords(self.glyph_coords[biome], self.biome_mat.shape, out_size)
-            Terrain._stamp_glyphs(surf, coords, style.paths, glyph_size=style.size,
-                                  knockout_glyphs=style.knockout,
-                                  knockout_background_color=style.knockout_colour,
-                                  knockout_fill=style.knockout_fill,
-                                  knockout_variants=style.knockout_variants,
-                                  knockout_spread=style.knockout_spread)
+            coords = Terrain.to_render_coords(
+                self.glyph_coords[biome], self.biome_mat.shape, out_size
+            )
+            Terrain._stamp_glyphs(
+                surf,
+                coords,
+                style.paths,
+                glyph_size=style.size,
+                knockout_glyphs=style.knockout,
+                knockout_background_color=style.knockout_colour,
+                knockout_fill=style.knockout_fill,
+                knockout_variants=style.knockout_variants,
+                knockout_spread=style.knockout_spread,
+            )
         rgb = p.surfarray.array3d(surf)
         alpha = p.surfarray.array_alpha(surf)
         rgba = np.dstack([rgb, alpha])
 
         # TODO this thing seems very unoptimized, we pass through pygame surfaces, and then copy everything to a matrix, which will then be rendered to a pygame surface
 
-
         return np.transpose(rgba, (1, 0, 2))
 
     @staticmethod
-    def voronoi_fields(shape: tuple[int, int], cell_size: float, jitter: float = 0.6,
-                       seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    def voronoi_fields(
+        shape: tuple[int, int], cell_size: float, jitter: float = 0.6, seed: int = 0
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Jittered-grid Voronoi (Worley/cellular noise) over an (H, W) pixel
         grid -> (labels, gap).
 
@@ -1404,8 +1145,8 @@ class Terrain:
 
         y = np.arange(rows, dtype=np.float32)[:, None]
         x = np.arange(cols, dtype=np.float32)[None, :]
-        cell_row = (y // cell_size).astype(np.int32)      # (rows, 1)
-        cell_col = (x // cell_size).astype(np.int32)      # (1, cols)
+        cell_row = (y // cell_size).astype(np.int32)  # (rows, 1)
+        cell_col = (x // cell_size).astype(np.int32)  # (1, cols)
 
         f1 = np.full(shape, np.inf, dtype=np.float32)
         f2 = np.full(shape, np.inf, dtype=np.float32)
@@ -1427,8 +1168,9 @@ class Terrain:
         return labels, f2 - f1
 
     @staticmethod
-    def _build_field_layer(surf: p.Surface, region: np.ndarray, style: FieldStyle,
-                           seed: int = 0) -> None:
+    def _build_field_layer(
+        surf: p.Surface, region: np.ndarray, style: FieldStyle, seed: int = 0
+    ) -> None:
         """Cut `region` (a bool mask, at the resolution of `surf`) into parcels
         and ink them onto `surf` in place -- furrows first, then the boundaries
         over them, same painter's order as the rest of the ink layer.
@@ -1437,7 +1179,9 @@ class Terrain:
         once per parcel id from a seeded generator, so a re-render at the same
         size lays down the same fields rather than re-rolling the whole county.
         """
-        labels, gap = Terrain.voronoi_fields(region.shape, style.cell_size, style.jitter, seed)
+        labels, gap = Terrain.voronoi_fields(
+            region.shape, style.cell_size, style.jitter, seed
+        )
 
         # One draw per parcel id, then indexed by the label image -- a lookup
         # table, so the per-pixel work stays vectorized.
@@ -1450,7 +1194,7 @@ class Terrain:
         # .min_coverage). bincount over the labels of the region's pixels is
         # the parcel areas in one pass, no per-parcel masking.
         area = np.bincount(labels[region], minlength=n_parcels)
-        region = region & (area >= style.min_coverage * style.cell_size ** 2)[labels]
+        region = region & (area >= style.min_coverage * style.cell_size**2)[labels]
 
         cropped = region & parcel_cropped[labels]
         for k, angle in enumerate(style.angles):
@@ -1458,9 +1202,12 @@ class Terrain:
             # mask to this angle's parcels is all the clipping needed.
             Terrain._blit_ink(
                 surf,
-                Terrain.hatch(cropped & (parcel_angle[labels] == k), angle=angle,
-                              line_spacing=style.hatch_spacing,
-                              thickness=style.hatch_thickness),
+                Terrain.hatch(
+                    cropped & (parcel_angle[labels] == k),
+                    angle=angle,
+                    line_spacing=style.hatch_spacing,
+                    thickness=style.hatch_thickness,
+                ),
                 style.hatch_colour,
             )
 
@@ -1471,14 +1218,19 @@ class Terrain:
         Terrain._blit_ink(surf, edge * region, style.edge_colour)
 
     @staticmethod
-    def hatch(mask: np.ndarray, angle: float, line_spacing: float = 4.0,
-              thickness: float = 1.2, wobble_amp: float = 0.0) -> np.ndarray:
+    def hatch(
+        mask: np.ndarray,
+        angle: float,
+        line_spacing: float = 4.0,
+        thickness: float = 1.2,
+        wobble_amp: float = 0.0,
+    ) -> np.ndarray:
         """Parallel hatch-line mask at `angle` degrees, masked to `mask`. Lines
         `line_spacing` px apart, `thickness` px wide. `wobble_amp` > 0 jitters
         the lines for a hand-drawn feel (uses pnoise2 -- pnoise1 only takes a
         single scalar coordinate, not per-pixel x/y arrays, so it can't drive a
         2D wobble field directly).
-        
+
         :return: a zero matrix with ones in places where you should draw the pixels"""
         rows, cols = mask.shape
         # Two 1-D profiles rather than two full coordinate grids: the projection
@@ -1491,16 +1243,21 @@ class Terrain:
         a = np.radians(angle)
         coord = x * np.cos(a) + y * np.sin(a)
         if wobble_amp:
-            wobble = np.vectorize(
-                lambda xi, yi: noise.pnoise2(xi * 0.05, yi * 0.05)
-            )(x, y)
+            wobble = np.vectorize(lambda xi, yi: noise.pnoise2(xi * 0.05, yi * 0.05))(
+                x, y
+            )
             coord = coord + wobble * wobble_amp
         hatch = (coord % line_spacing) < thickness
         return hatch & (mask > 0)
 
     @staticmethod
-    def contour(mask: np.ndarray, thickness: float = 1.0, align: str = "inner",
-                soft: bool = False) -> np.ndarray:
+    def contour(
+        mask: np.ndarray,
+        thickness: float = 1.0,
+        align: str = "inner",
+        soft: bool = False,
+        offset: float = 0.0,
+    ) -> np.ndarray:
         """
         Like hatch, returns a matrix contouring the mask -- the outline of every
         region in it (holes included), as a band `thickness` px wide.
@@ -1528,6 +1285,13 @@ class Terrain:
             [0,1]: the band edges are antialiased and `thickness` becomes
             genuinely fractional, which is what you want when the line is going
             to be drawn as ink rather than used as a mask.
+        :param offset: slide the whole band across the boundary, in pixels of
+            `mask`. NEGATIVE moves it into the region, positive out of it. This
+            is the fine adjustment `align` is too coarse for: a shoreline drawn
+            "outer" sits entirely on the land side, and nudging it a pixel or
+            two into the water reads better without going all the way to
+            "center". Costs one extra distance transform when non-zero (see
+            below), so leave it at 0 unless you want the nudge.
         :return: bool matrix, or float coverage if `soft`
 
         Note a region running off the edge of the array gets no contour along
@@ -1538,12 +1302,17 @@ class Terrain:
 
         # Every alignment is the same thing -- a signed-distance interval --
         # so they only differ in where that interval sits relative to zero.
-        bands = {"inner":  (-thickness, 0.0),
-                 "outer":  (0.0, thickness),
-                 "center": (-thickness / 2.0, thickness / 2.0)}
+        bands = {
+            "inner": (-thickness, 0.0),
+            "outer": (0.0, thickness),
+            "center": (-thickness / 2.0, thickness / 2.0),
+        }
         if align not in bands:
-            raise ValueError(f"contour: align must be one of {sorted(bands)}, got {align!r}")
+            raise ValueError(
+                f"contour: align must be one of {sorted(bands)}, got {align!r}"
+            )
         lo, hi = bands[align]
+        lo, hi = lo + offset, hi + offset
 
         # The EDT gives distance to the nearest pixel of the OTHER class: >= 1
         # on its own side, 0 on the other. The half-pixel shift recentres it on
@@ -1554,7 +1323,14 @@ class Terrain:
         # the region fall out at -0.5 (their outside-distance is 0), already
         # below the band, and "inner" is the mirror image. The EDT is the whole
         # cost of this function, so that halves the common case.
-        if align == "outer":
+        #
+        # That shortcut relies on the band staying on one side of zero, which
+        # an `offset` is exactly the thing that breaks -- shift an "outer" band
+        # inward and those -0.5 pixels are suddenly inside it, so every pixel
+        # of the region would ink. With an offset, pay for both transforms.
+        if offset:
+            signed = np.where(inside, 0.5 - _edt(inside), _edt(~inside) - 0.5)
+        elif align == "outer":
             signed = _edt(~inside) - 0.5
         elif align == "inner":
             signed = 0.5 - _edt(inside)
@@ -1569,12 +1345,13 @@ class Terrain:
         # centred exactly on an edge comes out half covered -- standard
         # one-pixel analytic antialiasing.
         return np.clip(np.minimum(signed - lo, hi - signed) + 0.5, 0.0, 1.0)
-    
+
     @staticmethod
-    def compute_shadows(height_map: np.ndarray,
-                        sun_params: SunParams,
-                        shadow_falloff: float | None = None
-                        ) -> np.ndarray:
+    def compute_shadows(
+        height_map: np.ndarray,
+        sun_params: SunParams,
+        shadow_falloff: float | None = None,
+    ) -> np.ndarray:
         """
         Returns bool mask, True = in cast shadow.
 
@@ -1582,29 +1359,37 @@ class Terrain:
         """
         from scipy.ndimage import rotate
 
-        a = sun_params.azimuth - 270.0                      # rotate so light travels along +x
-        Hr = rotate(height_map, a, reshape=True, order=1,
-                    mode='constant', cval=height_map.min())
+        a = sun_params.azimuth - 270.0  # rotate so light travels along +x
+        Hr = rotate(
+            height_map, a, reshape=True, order=1, mode="constant", cval=height_map.min()
+        )
 
         if shadow_falloff is None:
-            shadow_falloff = 1.0 / Hr.shape[1] # type: ignore
+            shadow_falloff = 1.0 / Hr.shape[1]  # type: ignore
         drop = np.tan(np.radians(sun_params.elevation)) * shadow_falloff
         shadow_r = _sweep(Hr, drop)
 
-        back = rotate(shadow_r.astype(np.float32), -a, reshape=True,
-                    order=1, mode='constant', cval=0.0)
+        back = rotate(
+            shadow_r.astype(np.float32),
+            -a,
+            reshape=True,
+            order=1,
+            mode="constant",
+            cval=0.0,
+        )
         oy, ox = height_map.shape
         y0 = (back.shape[0] - oy) // 2
-        x0 = (back.shape[1] - ox) // 2 # type: ignore
-        return back[y0:y0+oy, x0:x0+ox] > 0.5
+        x0 = (back.shape[1] - ox) // 2  # type: ignore
+        return back[y0 : y0 + oy, x0 : x0 + ox] > 0.5
 
     @staticmethod
-    def compute_shadow_accumulation(height_map: np.ndarray,
-                                    sun_params: SunParams,
-                                    num_samples: int = 16,
-                                    max_elevation: float = 60.0,
-                                    azimuth_range: tuple[float, float] = (60.0, 300.0)
-                                    ) -> np.ndarray:
+    def compute_shadow_accumulation(
+        height_map: np.ndarray,
+        sun_params: SunParams,
+        num_samples: int = 16,
+        max_elevation: float = 60.0,
+        azimuth_range: tuple[float, float] = (60.0, 300.0),
+    ) -> np.ndarray:
         """Sweeps a simplified day (elevation rises/falls like a sine arc, azimuth
         sweeps linearly across azimuth_range) and returns, per cell, the FRACTION
         of that sampled day spent in cast shadow -- how perpetually gloomy a spot
@@ -1628,7 +1413,9 @@ class Terrain:
                 elevation=max_elevation * np.sin(np.pi * t),
                 azimuth=azimuth_start + t * (azimuth_end - azimuth_start),
             )
-            accumulator += Terrain.compute_shadows(height_map, sample_params, sun_params.shadow_falloff)
+            accumulator += Terrain.compute_shadows(
+                height_map, sample_params, sun_params.shadow_falloff
+            )
         return accumulator / num_samples
 
     def change_mode(self, new_mode: TerrainMode):
@@ -1644,6 +1431,7 @@ class Terrain:
         # baked already, but this keeps a directly-assigned .mode working too.
         surf.blit(self.surface_for(self.mode), self.bounding_rect)
 
+
 def _edt(mask: np.ndarray) -> np.ndarray:
     """Euclidean distance transform: per cell, the distance to the nearest
     zero cell.
@@ -1655,19 +1443,21 @@ def _edt(mask: np.ndarray) -> np.ndarray:
     might be a tuple or None and flags the arithmetic. With the defaults it is
     always a single array, and saying so once here beats casting five times."""
     from scipy.ndimage import distance_transform_edt
+
     return cast(np.ndarray, distance_transform_edt(mask))
 
 
 def _sweep(H: np.ndarray, drop: float) -> np.ndarray:
     """Light travels left->right (+x). True = in shadow. O(rows*cols)."""
     shadow = np.empty(H.shape, dtype=bool)
-    horizon = np.full(H.shape[0], -np.inf)      # one 'depth buffer' value per row
-    for x in range(H.shape[1]):                  # python loop over cols only;
-        horizon -= drop                          # each step vectorized over rows
+    horizon = np.full(H.shape[0], -np.inf)  # one 'depth buffer' value per row
+    for x in range(H.shape[1]):  # python loop over cols only;
+        horizon -= drop  # each step vectorized over rows
         col = H[:, x]
         shadow[:, x] = col < horizon
         np.maximum(horizon, col, out=horizon)
     return shadow
+
 
 def as_image_array(matrix: np.ndarray) -> np.ndarray:
     """Normalise the raw [-1, 1]-ish noise to a 0..255 uint8 greyscale array
@@ -1680,6 +1470,7 @@ def as_image_array(matrix: np.ndarray) -> np.ndarray:
     norm = (m - lo) / (hi - lo)  # -> [0, 1]
     return (norm * 255).astype(np.uint8)
 
+
 def _rgba_to_surf(rgba: np.ndarray) -> p.Surface:
     # rgba is (row, col, 4); array_to_surface wants (x=col, y=row), so swap
     # the first two axes to avoid a transposed image. SRCALPHA so a non-opaque
@@ -1688,121 +1479,3 @@ def _rgba_to_surf(rgba: np.ndarray) -> p.Surface:
     surf = p.Surface((rgba.shape[1], rgba.shape[0]), p.SRCALPHA)
     Terrain.to_pygame_surf(rgba, surf)
     return surf
-
-# TODO remove from uv scipy and pillow
-from PIL import Image
-
-if __name__ == "__main__":
-    # DPI awareness is opt-in (Windows scales the window otherwise). To make this
-    # preview a fixed pixel size, uncomment:
-    # from Resolution import set_dpi_awareness; set_dpi_awareness()
-
-    # image.load/convert_alpha and surfarray need a display mode set first.
-    p.init()
-    p.display.set_mode((1, 1))
-
-    # t = Terrain((2**9, 2**9), random.randint(0, 10000))   # 512x512
-    par = NoiseParams((2**9, 2**9), seed=0)
-    moisture_par = NoiseParams((2**9, 2**9), seed=1)
-    sun_par = SunParams()
-    t = Terrain(par, moisture_par, sun_par, bounding_rect=p.Rect((0, 0), par.size))   # 512x512
-
-    def _mask_to_rgba(mask: np.ndarray) -> np.ndarray:
-        """A {0,1} float mask (band/step output) -> (H, W, 4) opaque RGBA."""
-        return Terrain._grey_to_rgba(mask)
-
-
-    def _glyph_view(coords, glyph_paths: list[str], glyph_size: int, seed: int = 0,
-                     max_rotation: float = 5.0,
-                     scale_range: tuple[float, float] = (0.8, 1.2),
-                     knockout_glyphs: bool = False,
-                     knockout_background_color=(255, 255, 255)) -> p.Surface:
-        """Preview helper: a fresh coloured-biome-map surface with one biome's
-        glyphs stamped on top, via Terrain._stamp_glyphs. Unlike
-        Terrain._build_glyph_map (which composites every BIOME_GLYPHS
-        entry onto ONE shared surface), each call here starts from a clean
-        copy of colour_map -- these preview tiles show one biome in isolation."""
-        surf = _rgba_to_surf(t.colour_map)
-        Terrain._stamp_glyphs(surf, coords, glyph_paths, glyph_size, seed=seed,
-                               max_rotation=max_rotation, scale_range=scale_range,
-                               knockout_glyphs=knockout_glyphs,
-                               knockout_background_color=knockout_background_color)
-        return surf
-
-    def _hatch_view(mask: np.ndarray, colour: tuple[int, int, int], angle: float = 45, line_spacing: int = 4, thickness: float = 1.2,
-                     wobble_amp: float = 0.0) -> p.Surface:
-        """Coloured biome map with parallel hatch lines drawn in `colour`,
-        confined to `biome`'s region (Terrain.hatch masks itself to the biome,
-        so no separate clipping needed here)."""
-        lines = Terrain.hatch(mask, angle=angle, line_spacing=line_spacing,
-                               thickness=thickness, wobble_amp=wobble_amp)
-
-        rgba = t.colour_map.copy()
-        rgba[lines] = (*colour, 255)
-        return _rgba_to_surf(rgba)
-
-    MOUNTAIN_GLYPHS_KNOCKOUT = [
-        "Assets/sprites/glyphs/mountain/mountain1_knockout.png",
-        "Assets/sprites/glyphs/mountain/mountain2_knockout.png",
-        "Assets/sprites/glyphs/mountain/mountain3_knockout.png",
-    ]
-    FOREST_GLYPHS = BIOME_GLYPHS[Biome.RAINFOREST].paths
-    MOUNTAIN_GLYPHS_OG = BIOME_GLYPHS[Biome.MOUNTAIN].paths
-
-    # Each entry: (label, either an (H, W, 4) uint8 RGBA array [converted via
-    # _rgba_to_surf] or an already-built p.Surface [glyph views, which need to
-    # blit sprites rather than just display an array]).
-    hatched_shadow = Terrain.hatch(t.shadow_map, 45)
-    views: list[tuple[str, np.ndarray | p.Surface]] = [
-        ("greyscale heightmap", Terrain._grey_to_rgba(as_image_array(t.height_map) / 255.0)),
-        ("elevation heightmap (blue-red)", Terrain.apply_palette(t.height_map, Terrain.ELEVATION_PALETTE)),
-        ("temperature map (blue-red)", Terrain.apply_palette(Terrain.normalize(t.temp_map), Terrain.TEMPERATURE_PALETTE)),
-        ("coloured biome map", t.colour_map),
-        ("glyph map", t.surface_for(TerrainMode.GLYPHMAP)),
-        ("inked biome map", Terrain.build_inked_mat(t.height_map, INK, ink_width=0.02)),
-        ("band @0.4 w0.05", _mask_to_rgba(Terrain.band(t.height_map, center=0.4, width=0.05))),
-        ("step @0.5", _mask_to_rgba(Terrain.step(t.height_map, edge=0.5))),
-        ("forest glyphs", _glyph_view(t.get_point_cloud_coords(Biome.RAINFOREST, grid_like=False, how_many=400, margin_px=5), FOREST_GLYPHS, glyph_size=18)),
-        ("forest glyphs (dense)", _glyph_view(t.get_point_cloud_coords(Biome.RAINFOREST, grid_like=False, how_many=None, spacing=8, margin_px=5), FOREST_GLYPHS, glyph_size=18)),
-        ("forest glyphs (dense, knockout)", _glyph_view(t.get_point_cloud_coords(Biome.RAINFOREST, grid_like=False, how_many=None, spacing=8, margin_px=5), FOREST_GLYPHS, glyph_size=18, knockout_glyphs=True)),
-        ("mountain glyphs (og)", _glyph_view(t.get_point_cloud_coords(Biome.MOUNTAIN, grid_like=False, how_many=None, spacing=16, margin_px=5), MOUNTAIN_GLYPHS_OG, glyph_size=24)),
-        ("mountain glyphs (ko)", _glyph_view(t.get_point_cloud_coords(Biome.MOUNTAIN, grid_like=False, how_many=None, margin_px=5), MOUNTAIN_GLYPHS_KNOCKOUT, glyph_size=24)),
-        ("forest hatch", _hatch_view(Terrain.get_biome_mask(t.biome_mat, Biome.RAINFOREST), (60, 130, 70), angle=45,
-                                     line_spacing=5, thickness=1.2, wobble_amp=1.5)),
-        ("hatched shadows", _hatch_view(t.shadow_map, (20, 20, 20), angle=45, line_spacing=5, thickness=1.2, wobble_amp=1.5))
-    ]
-    view_index = 0
-
-    def _make_surf(view: np.ndarray | p.Surface) -> p.Surface:
-        if isinstance(view, p.Surface):
-            return view
-        return _rgba_to_surf(view)
-
-    label, rgb = views[view_index]
-    surf = _make_surf(rgb)
-    screen = p.display.set_mode(surf.get_size())
-    p.display.set_caption(f"Terrain preview: {label}  --  [R] next view, ESC to quit")
-    clock = p.time.Clock()
-    running = True
-            
-    while running:
-        for event in p.event.get():
-            if event.type == p.QUIT:
-                running = False
-            elif event.type == p.KEYDOWN and event.key == p.K_ESCAPE:
-                running = False
-            elif event.type == p.KEYDOWN and event.key == p.K_r:
-                view_index = (view_index + 1) % len(views)
-                label, rgb = views[view_index]
-                surf = _make_surf(rgb)
-                p.display.set_caption(f"Terrain preview: {label}  --  [R] next view, ESC to quit")
-        # GLYPHMAP has real (anti-aliased, partial-alpha) transparency, unlike
-        # every other view which is fully opaque -- without a clear here, each
-        # frame re-composites those soft edges onto the PREVIOUS frame's result
-        # instead of a clean background, so alpha visibly accumulates over time
-        # (looks like the glyphs "fade in" and thicken at their edges).
-        screen.fill((255, 255, 255))
-        screen.blit(surf, (0, 0))
-        p.display.flip()
-        clock.tick(60)
-    p.quit()

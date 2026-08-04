@@ -558,7 +558,7 @@ class Terrain3dTestState(State):
         )
         self.light_dir /= np.linalg.norm(self.light_dir)
 
-        self.sea_level = BIOME_THRESHOLDS_REV[Biome.SEASIDE][1]
+        self.sea_level = BIOME_THRESHOLDS_REV[Biome.LAKE][1]
 
     def _vertex_colors(self) -> np.ndarray:
         """One RGB per vertex, in [0,1]. Every mode reuses a Terrain palette
