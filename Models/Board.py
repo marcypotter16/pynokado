@@ -7,6 +7,7 @@ import pygame as p
 
 from GameObject import GameObject
 from Models.Card import Card, _tint_ink
+from Models.Routes import Sites
 from Models.Terrain import Biome, NoiseParams, SunParams, Terrain, TerrainMode
 from Models.Weather import Weather
 from Utils.Colors import BLUE, GREEN, WHITE
@@ -75,6 +76,7 @@ class Board(GameObject):
         # the board must not stack duplicate runs on the previous board's.
         self.board_lines: dict[int, list[tuple[p.Vector2, p.Vector2]]] = {}
         self._show_extendable_nodes = False
+        self._show_routes = False   # R toggles; T toggles the pruned overlay
         self._start_node_for_board_extenstion = None
         self._available_new_nodes = []
         self._build_starting_board()
@@ -119,6 +121,9 @@ class Board(GameObject):
         self.weather = Weather(aoi, self.terrain.render_size,
                                seed=self.terrain.noise_params.seed, fog=False,
                                origin=self.terrain_rect.topleft, snow_mask=snow_mask)
+
+        self.sites = Sites.construct_sites(self.terrain, self.terrain_rect.size)
+        # self.add_to_render_queue(self.sites, 10)
 
     def _build_starting_board(self):
         center_coords = p.Vector2(1, 1) * (self.MAX_SIZE - 1) / 2
@@ -188,7 +193,19 @@ class Board(GameObject):
                     self.toggle_brush_mode()
                 if event.key == p.K_s:
                     self._toggle_show_extendable_nodes()
-        
+                if event.key == p.K_r:
+                    self._show_routes = not self._show_routes
+                if event.key == p.K_t:
+                    self.sites.show_substrate = not self.sites.show_substrate
+
+        # The routes overlay is independent of brush mode. It used to be driven
+        # by it alone, which meant the only way to look at the graph was to
+        # enter a mode that also draws a brush cursor and candidate markers over
+        # the thing being looked at.
+        self.sites.show = (
+            self._show_routes or self.board_state == BoardStates.ADD_BRUSH_STATE
+        )
+
         if self.board_state == BoardStates.ADD_BRUSH_STATE:
             # actions["mouse_sx"] is the HELD state (1 down, 0 up, never -1);
             # clicked_sx is the edge (+1 on press, -1 on release). Both branches
@@ -321,7 +338,20 @@ class Board(GameObject):
                 blit_line(src, start, end)
         return surf
 
+    # The crimson brush lattice is the last of the Go board, and the campaign
+    # design replaced it: pieces stand on terrain-derived route nodes now, not
+    # on grid intersections (see docs/campaign-and-duel.md). Drawn, it asserts a
+    # second, contradictory board on top of the roads.
+    #
+    # The baking machinery below is kept rather than deleted -- `blit_line` is
+    # the only brush-stroke renderer in the codebase, and the roads will
+    # eventually want strokes instead of `p.draw.line`. Set this True to see the
+    # old board again.
+    SHOW_GO_LATTICE = False
+
     def render_board(self, surf: p.Surface):
+        if not self.SHOW_GO_LATTICE:
+            return
         if self._board_surface is None:
             self._board_surface = self._bake_board_surface()
         surf.blit(self._board_surface, (0, 0))
@@ -333,6 +363,11 @@ class Board(GameObject):
         if self.terrain.mode == TerrainMode.GLYPHMAP:
             self.weather.render(surf)
         self.render_board(surf)
+        # origin is not optional in practice: site positions are relative to the
+        # terrain's own rect, and terrain_rect is CENTRED on the screen rather
+        # than at (0, 0), so leaving it out shifts every site up and left by the
+        # rect's topleft -- (60, 28) at the current size.
+        self.sites.render(surf, origin=self.terrain_rect.topleft)
         if self.board_state == BoardStates.ADD_BRUSH_STATE and self.game.cursorpos:
             # Suppress Game's default circle cursor this frame; draw the brush instead.
             self.game.custom_cursor = True
@@ -347,3 +382,47 @@ class Board(GameObject):
         elif self._show_extendable_nodes:
             for row, col in self._get_verts_with_at_least_one_free_neigh():
                 p.draw.circle(surf, WHITE, self._coords2abspos(row, col), r)
+        # Last, so nothing draws over it.
+        if self.terrain.mode is TerrainMode.COLOURMAP:
+            self._render_biome_tooltip(surf)
+
+    # Tooltip geometry. Offset from the cursor's hotspot so the box sits clear
+    # of the pointer instead of under it.
+    TOOLTIP_OFFSET = (16, 16)
+    TOOLTIP_PAD = 6
+    TOOLTIP_BG = (28, 24, 20, 216)
+    TOOLTIP_FG = (238, 232, 220)
+
+    def _render_biome_tooltip(self, surf: p.Surface):
+        """Name the biome under the cursor, next to the cursor. COLOURMAP only:
+        that view is a flat wash with no glyphs or labels, so which stain is
+        which is otherwise guesswork -- the whole reason this exists is to make
+        the mode readable while tuning thresholds."""
+        if not self.game.cursorpos:
+            return
+        cx, cy = int(self.game.cursorpos[0]), int(self.game.cursorpos[1])
+        biome = self.terrain.biome_at_render_px(
+            cx - self.terrain_rect.left, cy - self.terrain_rect.top
+        )
+        if biome is None:  # cursor is off the map
+            return
+
+        font = self.game.fonts["inconsolata"]["small"]
+        label = biome.name.replace("_", " ").title()
+        text = font.render(label, True, self.TOOLTIP_FG)
+        pad = self.TOOLTIP_PAD
+        box = p.Surface(
+            (text.get_width() + 2 * pad, text.get_height() + 2 * pad), p.SRCALPHA
+        )
+        box.fill(self.TOOLTIP_BG)
+        box.blit(text, (pad, pad))
+
+        rect = box.get_rect(topleft=(cx + self.TOOLTIP_OFFSET[0], cy + self.TOOLTIP_OFFSET[1]))
+        # Flip to the other side of the cursor rather than letting the box run
+        # off-screen -- near the right or bottom edge is exactly where you end
+        # up when checking what the map does at its border.
+        if rect.right > self.game.GAME_W:
+            rect.right = cx - self.TOOLTIP_OFFSET[0]
+        if rect.bottom > self.game.GAME_H:
+            rect.bottom = cy - self.TOOLTIP_OFFSET[1]
+        surf.blit(box, rect)
