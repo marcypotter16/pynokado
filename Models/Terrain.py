@@ -29,19 +29,32 @@ from Models.TerrainStyle import (
     BIOME_THRESHOLDS,
     BIOME_THRESHOLDS_REV,
     BIOME_TINTS,
+    FORESTED,
     HAZE_CELLS,
     HAZE_COVERAGE,
     HAZE_EDGE_GAIN,
     HAZE_EDGE_SOFTNESS,
     HAZE_VARIATION,
     INK,
+    MAX_TREE_ALTITUDE,
     MOISTURE_THRESHOLDS,
+    PLATEAU_FLAT_QUANTILE,
+    PLATEAU_MIN_FLAT_FRACTION,
+    PLATEAU_WINDOW_DATA_PX,
     TEMPERATURE_THRESHOLDS,
+    TOPO_GRAD_EPS,
+    TOPO_INDEX_EVERY,
+    TOPO_INDEX_INK,
+    TOPO_INDEX_WIDTH_PX,
+    TOPO_INK,
+    TOPO_STEP,
+    TOPO_WIDTH_PX,
     WHITTAKER_TABLE,
     Biome,
     ContourStyle,
     FieldStyle,
     GlyphStyle,
+    HIGH_GROUND,
     HatchStyle,
     HazeStyle,
     MoistureLevels,
@@ -49,6 +62,7 @@ from Models.TerrainStyle import (
     SunParams,
     TemperatureLevels,
     TerrainMode,
+    WATER,
     _MOISTURE_LEVELS,
     _TEMPERATURE_LEVELS,
     _WHITTAKER_LUT,
@@ -220,8 +234,54 @@ class Terrain:
         return np.searchsorted(lower_bounds[1:], np.clip(vals, 0.0, 1.0), side="right")
 
     @staticmethod
+    def plateau_mask(height: np.ndarray, mountain_band: np.ndarray, scale: float = 1.0):
+        """Which cells of `mountain_band` are high FLAT ground rather than
+        relief -- i.e. the PLATEAU biome. Returns a bool array of height's shape.
+
+        `scale` is how many array pixels one DATA pixel spans: 1.0 when called
+        on the data grid, render_w / data_w when called on a resampled copy.
+        Both the slope and the window are expressed per data pixel and scaled by
+        it, so a plateau covers the same GROUND at either resolution instead of
+        growing or vanishing when the terrain is stretched. Without this the
+        render-space pass would measure slope between adjacent screen pixels --
+        a quarter of the ground distance, hence a quarter of the rise -- and
+        call the whole range flat.
+
+        Two steps, and the second is the one that matters:
+
+        1. Per-cell slope, thresholded at PLATEAU_FLAT_QUANTILE of the slopes
+           found INSIDE the mountain band. Relative, not absolute -- see the
+           note on that constant for why an absolute cutoff cannot work on fBm.
+        2. Averaged over a PLATEAU_WINDOW_DATA_PX window and required to be flat
+           over PLATEAU_MIN_FLAT_FRACTION of it. Step 1 alone gives speckle
+           scattered through the range, because a single flat cell means nothing
+           on a broadband slope field; flatness is a property of an area. The
+           window is what makes the result a region.
+        """
+        from scipy.ndimage import uniform_filter
+
+        if not mountain_band.any():
+            return np.zeros(height.shape, dtype=bool)
+
+        # Sample spacing in DATA-pixel units: one array pixel is 1/scale of a
+        # data pixel, so np.gradient divides by that and returns rise per data
+        # pixel at any resolution.
+        step = 1.0 / scale
+        gy, gx = np.gradient(height, step, step)
+        slope = np.hypot(gx, gy)
+
+        thr = np.quantile(slope[mountain_band], PLATEAU_FLAT_QUANTILE)
+        flat = (slope <= thr).astype(np.float64)
+        window = max(1, int(round(PLATEAU_WINDOW_DATA_PX * scale)))
+        coherent = uniform_filter(flat, size=window) >= PLATEAU_MIN_FLAT_FRACTION
+        return coherent & mountain_band
+
+    @staticmethod
     def classify_biomes(
-        height: np.ndarray, moisture: np.ndarray, temperature: np.ndarray
+        height: np.ndarray,
+        moisture: np.ndarray,
+        temperature: np.ndarray,
+        plateau: np.ndarray | None = None,
     ) -> np.ndarray:
         """height/moisture are height_map/moisture_map values (already
         [0,1]-normalized); temperature must be Terrain.normalize(temp_map) --
@@ -232,6 +292,13 @@ class Terrain:
         peaks and snowcaps are about being underwater/at altitude, not about
         temperature/moisture. Everything in between is a Whittaker-style lookup:
         temperature x moisture -> biome (see WHITTAKER_TABLE).
+
+        `plateau` is the one input that is not a field lookup: a bool mask from
+        Terrain.plateau_mask, which needs a NEIGHBOURHOOD and so cannot be
+        derived from the per-cell values this function otherwise works in.
+        Callers compute it at their own resolution and pass it in; omitting it
+        just means no PLATEAU is classified, which is why get_biome_from_val
+        (a single cell, no neighbourhood to speak of) can never return one.
 
         Fully vectorized over whole maps (returns Biome.value codes, same shape
         as the inputs) rather than classifying cell by cell. That's not just
@@ -252,6 +319,11 @@ class Terrain:
             np.uint8(Biome.MOUNTAIN.value),
             biomes,
         )
+        # Between MOUNTAIN and SNOW on purpose. It carves the flat parts out of
+        # the mountain band that was just written -- but a level field above the
+        # snowline is a snowfield, not a plateau, so SNOW still overwrites it.
+        if plateau is not None:
+            biomes = np.where(plateau, np.uint8(Biome.PLATEAU.value), biomes)
         biomes = np.where(
             h >= BIOME_THRESHOLDS_REV[Biome.SNOW][0], np.uint8(Biome.SNOW.value), biomes
         )
@@ -354,8 +426,12 @@ class Terrain:
         Note the rendered biome images do NOT come from here: they re-classify
         at render resolution (see _build_maps). Same function, same thresholds,
         just evaluated where the pixels are."""
+        mountain_band = self.height_map >= BIOME_THRESHOLDS_REV[Biome.MOUNTAIN][0]
         self.biome_mat = Terrain.classify_biomes(
-            self.height_map, self.moisture_map, self.temp_map_normalized
+            self.height_map,
+            self.moisture_map,
+            self.temp_map_normalized,
+            plateau=Terrain.plateau_mask(self.height_map, mountain_band, scale=1.0),
         )
 
     @staticmethod
@@ -434,10 +510,39 @@ class Terrain:
             height_r = self._render_field(self.height_map, order=3)
             moisture_r = self._render_field(self.moisture_map, order=3)
             temp_r = self._render_field(self.temp_map_normalized, order=3)
+            # Re-detected here rather than upscaling the data-space mask, for
+            # the same reason the classification itself is: a resampled bool
+            # mask would arrive with interpolated mud along its border, and the
+            # plateau's edge is exactly where mountain glyphs meet plateau
+            # trees. `scale` keeps the slope and window measured in ground
+            # units -- see plateau_mask.
+            mountain_band = height_r >= BIOME_THRESHOLDS_REV[Biome.MOUNTAIN][0]
             self._render_biomes_cache = Terrain.classify_biomes(
-                height_r, moisture_r, temp_r
+                height_r,
+                moisture_r,
+                temp_r,
+                plateau=Terrain.plateau_mask(
+                    height_r,
+                    mountain_band,
+                    scale=height_r.shape[1] / self.height_map.shape[1],
+                ),
             )
         return self._render_biomes_cache
+
+    def biome_at_render_px(self, x: int, y: int) -> Biome | None:
+        """The biome under one pixel of the DRAWN map, in coordinates local to
+        bounding_rect (subtract its topleft from a screen position). None when
+        the pixel falls outside the map.
+
+        Reads the render-resolution classification, not biome_mat, so the answer
+        is the biome whose colour is actually under that pixel -- the two differ
+        near every border, which is precisely where anyone bothers to point at
+        the map. The array is the cached one _render_biomes already built for
+        the wash, so this costs an index, not a classification."""
+        w, h = self.render_size
+        if not (0 <= x < w and 0 <= y < h):
+            return None
+        return Biome(int(self._render_biomes()[y, x]))
 
     def _render_map(self, mode: TerrainMode) -> np.ndarray:
         """One mode's (H_out, W_out, 4) uint8 RGBA image, at render size. RGBA
@@ -471,7 +576,90 @@ class Terrain:
             return Terrain._grey_to_rgba(
                 self._render_field(self.shadow_map.astype(np.float64), order=1)
             )
+        if mode is TerrainMode.TOPOMAP:
+            return self._render_topo()
         raise ValueError(f"no renderer for terrain mode {mode!r}")
+
+    def _render_topo(self) -> np.ndarray:
+        """Isoipses -- the level sets of height_map every TOPO_STEP -- as an
+        RGBA image with a TRANSPARENT background, so the lines ink onto the
+        parchment the way the glyph map does rather than covering it.
+
+        The whole difficulty is line WIDTH. Inking every pixel whose height
+        falls within a window of a level (the obvious approach) gives a line
+        whose width is `window / |grad h|` -- decided by the local slope, not by
+        us. Measured on this terrain at render size, |grad h| spans 0.00018 to
+        0.0055, a 30x range, so the lines did too: a 0.05 window came out 32px
+        wide at the median, over 199px on the flattest ground, and 22% of the
+        map was inked. On the steep side the opposite failure appears -- once
+        the height climbs by more than the window between adjacent pixels the
+        band is stepped over entirely and the line breaks into dots.
+
+        Dividing by the gradient fixes both at once. Near a level set the field
+        is locally linear, h(x) ~ h(x0) + grad h . (x - x0), so
+
+            |h - level| / |grad h|
+
+        IS the perpendicular distance to that level set, in pixels, to first
+        order. Thresholding it draws a line of the width asked for wherever the
+        ground is steep enough to have one. Same map, same step: 2.1% inked.
+
+        Everything is float32 and in place where numpy allows: one render-size
+        array is 7MB at 1800x1000 and several are live at once, so this half of
+        the function peaks at 38MB. Do NOT bother micro-optimizing the temps
+        further -- np.where here allocating a float64 and casting it down was
+        measured against a preallocated-and-patched version and the two came out
+        at the SAME 38MB peak and the same runtime, because the temporary is
+        freed before the peak is reached. The peak for the whole call is 75MB
+        and all of it belongs to _render_field's float64 resample, upstream of
+        anything here.
+        """
+        # order=3 and height_map, matching HEIGHTMAP exactly -- the two modes
+        # have to agree about where a given altitude is, or switching between
+        # them would show the contours sitting off the colour bands.
+        hr = self._render_field(self.height_map, order=3).astype(np.float32)
+
+        # Gradient FIRST, while hr is still the height: everything below
+        # overwrites hr in place, and np.gradient needs the original.
+        gy, gx = np.gradient(hr)
+        np.hypot(gy, gx, out=gy)  # gy becomes |grad h|
+        del gx
+        np.maximum(gy, TOPO_GRAD_EPS, out=gy)
+
+        # hr: height -> level coordinate -> signed offset from the nearest
+        # level -> unsigned -> back to height units -> distance in px.
+        hr *= np.float32(1.0 / TOPO_STEP)
+        nearest = np.round(hr)
+        # Index contours are chosen on the level NUMBER, so this must be read
+        # off `nearest` before it is discarded.
+        index_line = np.mod(nearest, TOPO_INDEX_EVERY) == 0
+        np.subtract(hr, nearest, out=hr)
+        del nearest
+        np.abs(hr, out=hr)
+        hr *= np.float32(TOPO_STEP)
+        np.divide(hr, gy, out=hr)
+        del gy
+
+        # Coverage -> alpha. `half + 0.5 - dist` clipped to [0,1] is a 1px
+        # linear ramp across the edge of the line, which is enough antialiasing
+        # for a stroke this thin; a smoothstep costs another pass over 1.8M
+        # cells and is not visibly different at 1-3px.
+        half = np.where(
+            index_line, TOPO_INDEX_WIDTH_PX * 0.5, TOPO_WIDTH_PX * 0.5
+        ).astype(np.float32)
+        np.subtract(half, hr, out=half)
+        half += np.float32(0.5)
+        np.clip(half, 0.0, 1.0, out=half)
+
+        rgba = np.empty((*hr.shape, 4), np.uint8)
+        del hr
+        rgba[..., 3] = (half * 255.0).astype(np.uint8)
+        del half
+        # Colour per pixel by which KIND of line it is. Where alpha is 0 the
+        # value is arbitrary, so this needs no masking.
+        for c in range(3):
+            rgba[..., c] = np.where(index_line, TOPO_INDEX_INK[c], TOPO_INK[c])
+        return rgba
 
     def _bake_surface(self, rgba: np.ndarray) -> p.Surface:
         """A render-size RGBA image -> a blittable surface. Pure format
@@ -739,6 +927,26 @@ class Terrain:
         return mask.astype(np.float64)
 
     @staticmethod
+    def get_biomes_mask(
+        biome_mat: np.ndarray, biomes, margin_px: float = 0.0
+    ) -> np.ndarray:
+        """Like get_biome_mask but for a GROUP of biomes -- pass one of the sets
+        in TerrainStyle (WATER, HIGH_GROUND, FORESTED) or any iterable of Biome.
+
+        Returns **bool**, not the float64 get_biome_mask returns. That one is
+        float because a fractional `margin_px` inset makes it one; this is a
+        plain membership test, and bool is what callers want for `&`.
+
+        The group is treated as a single region, so `margin_px` insets from the
+        outside of the UNION -- two adjacent members of the group do not inset
+        away from each other. That is the point: a forest that is half taiga and
+        half rainforest is one wood, not two with a seam down the middle."""
+        mask = np.isin(biome_mat, [b.value for b in biomes])
+        if margin_px > 0:
+            mask = _edt(mask) >= margin_px
+        return mask
+
+    @staticmethod
     def to_render_coords(
         coords, data_shape: tuple[int, int], out_size: tuple[int, int]
     ):
@@ -767,6 +975,7 @@ class Terrain:
         margin_px: float = 0.0,
         out_size: tuple[int, int] | None = None,
         rng=None,
+        extra_mask: np.ndarray | None = None,
     ):
         """Coordinates to spawn glyphs at, in PAINT ORDER (ascending row/y).
 
@@ -776,8 +985,18 @@ class Terrain:
         `out_size` = (width, height) to get the result scaled into render
         space; leave it None for raw data-space coordinates. `rng` is forwarded
         to the sampler (see compute_glyph_points_mat_unif) for reproducible
-        placement."""
+        placement.
+
+        `extra_mask` is ANDed with the biome's own mask, in data space, to
+        restrict placement to part of a region -- a treeline being the reason
+        it exists (see GlyphStyle.max_height). It narrows where glyphs may
+        land; it does not extend them past the biome."""
         biome_mask = Terrain.get_biome_mask(self.biome_mat, biome, margin_px=margin_px)
+        if extra_mask is not None:
+            # get_biome_mask hands back float64 (it may carry a fractional EDT
+            # inset), so multiply rather than & -- the samplers only care that
+            # excluded cells are 0.
+            biome_mask = biome_mask * extra_mask
         if not grid_like:
             # keyword args here on purpose: compute_glyph_points_mat_unif's
             # signature is (mask, spacing, how_many, return_coords) -- a stray
@@ -967,11 +1186,21 @@ class Terrain:
             )
             if self._glyph_spacing.get(biome) == spacing:
                 continue
+            # The treeline, when the style declares one. Data space, matching
+            # the biome mask it gets ANDed with. Cheap to rebuild alongside the
+            # sampling and not worth caching separately: this whole branch only
+            # runs when the scale actually changed.
+            extra_mask = (
+                None
+                if style.max_height is None
+                else self.height_map < style.max_height
+            )
             self.glyph_coords[biome] = self.get_point_cloud_coords(
                 biome,
                 grid_like=False,
                 how_many=None,
                 spacing=spacing,
+                extra_mask=extra_mask,
                 margin_px=Terrain.to_data_px(
                     style.margin, self.biome_mat.shape, out_size
                 ),
@@ -1151,6 +1380,23 @@ class Terrain:
         f1 = np.full(shape, np.inf, dtype=np.float32)
         f2 = np.full(shape, np.inf, dtype=np.float32)
         labels = np.zeros(shape, dtype=np.int32)
+        # Scratch, allocated once and rewritten by every window pass. The
+        # readable form of the loop below (`d = np.hypot(...)`, `f1 =
+        # np.where(...)`) allocates about a dozen render-size arrays per pass,
+        # so ~110 over the 9 passes. Measured at 1800x1000, cell_size 64:
+        # 512ms -> 393ms, a 23% saving on nothing but the allocator, and the
+        # output is bit-identical.
+        #
+        # Worth knowing before pushing this further: it is only ~6% of
+        # _build_glyph_map (2023ms -> 1900ms), because this function is about a
+        # quarter of that, and peak memory does not move at all -- the glyph
+        # map's 95MB peak is set elsewhere. Splitting the 2D gather into two 1D
+        # takes was also tried and did NOT help (same median), so the remaining
+        # cost here is the arithmetic, not the indexing.
+        d = np.empty(shape, dtype=np.float32)
+        dx = np.empty(shape, dtype=np.float32)
+        lab = np.empty(shape, dtype=np.int32)
+        closer = np.empty(shape, dtype=bool)
         for di in range(-radius, radius + 1):
             for dj in range(-radius, radius + 1):
                 # +radius converts a lattice index to an index into the padded
@@ -1158,14 +1404,27 @@ class Terrain:
                 # each of these is one full-image gather.
                 ii = cell_row + di + radius
                 jj = cell_col + dj + radius
-                d = np.hypot(seed_y[ii, jj] - y, seed_x[ii, jj] - x)
-                closer = d < f1
-                # Order matters: the old F1 becomes the candidate for F2 before
-                # F1 itself is overwritten.
-                f2 = np.where(closer, f1, np.minimum(f2, d))
-                labels = np.where(closer, (ii * n_cols + jj).astype(np.int32), labels)
-                f1 = np.where(closer, d, f1)
-        return labels, f2 - f1
+                np.subtract(seed_y[ii, jj], y, out=d)
+                np.subtract(seed_x[ii, jj], x, out=dx)
+                np.hypot(d, dx, out=d)
+                np.less(d, f1, out=closer)
+                # Order matters, and more so now that these are in place. The
+                # old F1 becomes the candidate for F2, so F2 has to be settled
+                # while F1 still holds the previous pass's value -- hence the
+                # two F2 lines before the F1 write, not after.
+                #
+                # The unconditional minimum looks like it corrupts the `closer`
+                # pixels, but it cannot: where `closer` holds, d < f1 <= f2, so
+                # the minimum would put d into f2 -- and the very next line
+                # overwrites exactly those pixels with the old f1 anyway.
+                np.minimum(f2, d, out=f2)
+                np.copyto(f2, f1, where=closer)
+                np.add(ii * n_cols, jj, out=lab)
+                np.copyto(labels, lab, where=closer)
+                np.copyto(f1, d, where=closer)
+        # gap = F2 - F1, folded into f2 rather than allocating a fifth image.
+        np.subtract(f2, f1, out=f2)
+        return labels, f2
 
     @staticmethod
     def _build_field_layer(

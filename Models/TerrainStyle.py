@@ -27,6 +27,7 @@ class TerrainMode(Enum):
     SHADOWMAP = 3
     GLYPHMAP = 4
     COLOURMAP = 5
+    TOPOMAP = 6
 
 
 class MoistureLevels(Enum):
@@ -59,6 +60,53 @@ class Biome(Enum):
     TAIGA = 7
     DESERT = 8
     SAVANNAH = 9
+    # High flat ground. NOT a climate band and NOT a height band -- it is the
+    # part of the mountain band that is level (see Terrain.plateau_mask), so it
+    # is the one biome here selected by the SHAPE of the terrain rather than by
+    # a threshold on a field.
+    #
+    # It exists because "high ground" and "steep ground" are not the same thing
+    # and the height bands alone conflate them: everything above the mountain
+    # threshold got a mountain glyph and therefore, by the one-symbol-per-cell
+    # convention this map draws in, no vegetation -- which is wrong, real
+    # mountains are wooded well above the point where you would call them
+    # mountains. A plateau is exactly the high ground where no mountain glyph
+    # is drawn, so it is where trees can live at altitude without a tree ever
+    # being stamped on top of a peak. Whether they actually do is the treeline:
+    # see MAX_TREE_ALTITUDE.
+    PLATEAU = 10
+
+
+# --- Biome groups ----------------------------------------------------------
+#
+# Named sets for the questions that are about a CATEGORY of ground rather than
+# one biome -- "is this wet", "is this forested". Define the group once here and
+# every caller agrees; the alternative is `== Biome.LAKE.value` scattered around,
+# and then adding a SEA means hunting all of them.
+#
+# Why sets and not enum.Flag (which would give `Biome.TAIGA | Biome.RAINFOREST`,
+# pygame-style): biome_mat stores Biome.value as uint8. Flag values are powers of
+# two, so 11 biomes reach 1024 and the array has to become uint16 -- doubling the
+# render-resolution cache that _render_biomes deliberately keeps small. Flags
+# would also cap the biome count at the bit width, and this enum has grown twice
+# recently. A frozenset costs nothing and has no ceiling.
+#
+# For masks use Terrain.get_biomes_mask(biome_mat, GROUP); for a single value
+# `biome in GROUP` works directly.
+
+# Everything a land unit cannot walk across. One member today; the reason this is
+# a group at all is that a real coastline would add SEA (see the note on
+# Biome.LAKE for why none exists yet).
+WATER: frozenset[Biome] = frozenset({Biome.LAKE})
+# Steep ground. Deliberately NOT PLATEAU -- that is high but level, which is the
+# whole point of it existing.
+HIGH_GROUND: frozenset[Biome] = frozenset({Biome.MOUNTAIN, Biome.SNOW})
+# Anything that draws trees. PLATEAU only carries them below MAX_TREE_ALTITUDE
+# (see its GlyphStyle), so a bare high plateau is in this set while showing no
+# trees -- callers that care about actual canopy have to check the height too.
+FORESTED: frozenset[Biome] = frozenset(
+    {Biome.RAINFOREST, Biome.TAIGA, Biome.PLATEAU}
+)
 
 
 MOISTURE_THRESHOLDS: dict[tuple[float, float], MoistureLevels] = {
@@ -90,6 +138,29 @@ BIOME_THRESHOLDS: dict[tuple[float, float], Biome] = {
 BIOME_THRESHOLDS_REV: dict[Biome, tuple[float, float]] = dict(
     (v, k) for k, v in BIOME_THRESHOLDS.items()
 )
+
+# --- PLATEAU detection (see Terrain.plateau_mask) ---------------------------
+#
+# Why a QUANTILE and not an absolute slope cutoff: gradient magnitude has no
+# stable scale here. The height field is fBm with persistence 0.5 and lacunarity
+# 1.8, so octave k contributes 0.5**k to the height but 0.5**k * 1.8**k = 0.9**k
+# to its gradient -- i.e. the height is dominated by the coarsest octave while
+# the slope has near-equal energy in ALL of them. Slope is therefore broadband
+# by construction, and any absolute cutoff would have to be re-tuned the moment
+# the noise params move. Taking the flattest fraction OF THE MOUNTAIN BAND
+# instead is scale-free and survives retuning.
+PLATEAU_FLAT_QUANTILE = 0.35
+# Minimum size of a plateau, in DATA pixels. This is the parameter that makes
+# the feature work at all: thresholding slope cell-by-cell gives salt-and-pepper
+# (see above -- the fine octaves weigh as much as the coarse ones), because
+# being flat is a property of an AREA, not of a point. Averaging the flat mask
+# over a window and demanding most of that window be flat is what turns speckle
+# into regions.
+PLATEAU_WINDOW_DATA_PX = 6
+PLATEAU_MIN_FLAT_FRACTION = 0.7
+# Treeline, in normalized height_map units. Must sit INSIDE the mountain band
+# (0.8-0.95) to mean anything: below it a plateau is wooded, above it bare.
+MAX_TREE_ALTITUDE = 0.87
 
 # Simplified Whittaker biome diagram: (temperature, moisture) -> biome, for
 # everything that ISN'T gated purely by elevation (get_biome_from_val still
@@ -139,6 +210,12 @@ BIOME_TINTS: dict[Biome, p.Color] = {
     Biome.TAIGA: p.Color(88, 118, 100, 255),  # deep boreal spruce-green
     Biome.DESERT: p.Color(216, 178, 120, 255),  # warm sand/ochre
     Biome.SAVANNAH: p.Color(198, 178, 96, 255),  # dry golden grassland
+    # Highland green: same family as the forest greens so it reads as vegetated
+    # ground, but lighter and yellower than both -- upland pasture rather than
+    # canopy. It has to separate from RAINFOREST (122,148,108) at a glance
+    # since the two can sit close together on a flank, and from MOUNTAIN's grey
+    # since a plateau is a hole punched in exactly that colour.
+    Biome.PLATEAU: p.Color(158, 168, 116, 255),  # pale upland grass-green
 }
 
 
@@ -199,6 +276,13 @@ class GlyphStyle:
     # knockout pass per variant per sprite at bake time and nothing after.
     knockout_variants: int = 1
     knockout_spread: int = 0
+    # Optional altitude ceiling, in normalized height_map units. When set, the
+    # biome's glyphs only stamp on cells BELOW it -- the rest of the region
+    # keeps its wash and its outline but is left bare. This is a treeline: a
+    # biome can span a range of altitudes and only be vegetated over part of
+    # it, which no per-biome constant can express on its own. None = stamp
+    # everywhere in the region, the behaviour every other biome wants.
+    max_height: float | None = None
 
 
 # Per-biome glyph sprite sets for GLYPHMAP compositing. Only biomes with actual
@@ -241,6 +325,41 @@ BIOME_GLYPHS: dict[Biome, GlyphStyle] = {
         paths=["Assets/sprites/glyphs/forest/tree2.png"],
         size=22,
         spacing=26.0,
+    ),
+    # Upland wood on a plateau. Conifers (tree2, same as TAIGA) rather than the
+    # broadleaf tree1 -- this is forest at altitude, and reusing the boreal
+    # sprite is what makes it read that way without new art.
+    #
+    # Listed BEFORE Snow and Mountain so both stamp OVER it: a plateau is a gap
+    # in the range, and the peaks around its rim are nearer/higher ground, so
+    # they belong in front. The generous `margin` matters more here than
+    # anywhere else -- it holds the trees off the plateau's border, which is
+    # exactly where the surrounding mountain glyphs are, and keeps a tree from
+    # ever landing on a peak (this map draws symbols in profile, so a tree
+    # overlapping a mountain reads as neither in front nor behind).
+    #
+    # `max_height` is the treeline: above it the plateau stays bare paper with
+    # only its wash, which is the intended look for high barren tableland.
+    Biome.PLATEAU: GlyphStyle(
+        paths=["Assets/sprites/glyphs/forest/tree2.png"],
+        size=20,
+        # DENSE (rainforest spacing), which looks backwards for upland wood
+        # until you count what reaches this point. `margin` below already
+        # removes ~70% of the wooded area on a typical map -- measured: 1164
+        # qualifying cells become 347 -- because plateaus are small and an
+        # inset eats a small region from every side at once. Thinning the
+        # spacing on top of that was double-thinning: at spacing 30 a whole map
+        # got about ten trees, which reads as a mistake rather than as a wood.
+        # The sparse-upland impression has to come from the plateau being small
+        # and rare, not from the trees on it being far apart.
+        spacing=18.0,
+        # Load-bearing, do not lower without checking the border. MOUNTAIN
+        # glyphs are size 48 on the default margin 12, so they already reach up
+        # to ~12px INTO a neighbouring region; a plateau tree closer than that
+        # to the rim gets a peak stamped across it. Both are profile symbols,
+        # so an overlap reads as neither in front nor behind -- see Biome.PLATEAU.
+        margin=16.0,
+        max_height=MAX_TREE_ALTITUDE,
     ),
     # Peaks with a KNOCKOUT body: identical ink to MOUNTAIN below, over an
     # opaque near-white flank instead of bare paper. That difference is the
@@ -523,3 +642,40 @@ class SunParams:
     # shadow_max_temp_loss which only reacts to the current instant's shadow. Models valleys hemmed in
     # by mountains staying cold even when the current moment's sun happens to reach them directly.
     accumulated_shadow_temp_loss: float = 6.0
+
+
+# --- Topographic map (TerrainMode.TOPOMAP) ---------------------------------
+#
+# Isoipses: the level sets of height_map at regular intervals. See
+# Terrain._render_topo for how the width is held constant.
+
+# Contour interval, in height units (height_map is normalized to [0, 1], so
+# this is a fraction of the map's full relief). 0.05 gives ~20 lines. The first
+# draft used 0.2, which is only 5 lines over the whole map -- enough to tell
+# high from low, nowhere near enough to read a shape from.
+TOPO_STEP = 0.05
+# Line weight in RENDER px, like ContourStyle.thickness and for the same
+# reason: the line should keep its weight on screen however far the map is
+# stretched. This being expressible AT ALL is the point of the gradient
+# normalization -- thresholding the height directly makes the width a function
+# of the local slope instead, which on this terrain measured 32px at the median
+# and over 199px on the flattest ground.
+TOPO_WIDTH_PX = 1.4
+# Every Nth line is an INDEX contour, drawn heavier. Standard topographic
+# practice and the single thing that makes a contour map readable: without a
+# periodic heavy line there is no scale to count from, and 20 identical lines
+# read as texture rather than as elevation.
+TOPO_INDEX_EVERY = 5
+TOPO_INDEX_WIDTH_PX = 2.6
+# Sepia rather than INK's near-black: 20 lines at full ink weight is a much
+# denser page than the glyph map, and the index lines need somewhere darker to
+# go to still read as heavier.
+TOPO_INK: tuple[int, int, int] = (112, 92, 72)
+TOPO_INDEX_INK: tuple[int, int, int] = (58, 46, 34)
+# Divide-by-zero guard, NOT a width cap. Flat ground has gradient ~0, so the
+# distance-to-level-set estimate goes to infinity and no line is drawn -- which
+# is right, since a plain that sits BETWEEN two levels genuinely has no contour
+# crossing it. The one degenerate case is a plain sitting exactly ON a level:
+# 0/0, where the level set really is the whole region. This resolves that to
+# "no line" rather than a black blob.
+TOPO_GRAD_EPS = 1e-7
